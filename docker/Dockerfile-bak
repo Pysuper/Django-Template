@@ -1,0 +1,76 @@
+# 定义一个构建参数 PYTHON_VERSION，指定 Python 的版本为 3.9-slim-bullseye
+ARG PYTHON_VERSION=3.11.10-slim-bullseye
+
+# 使用指定的 Python 版本（3.9-slim-bullseye）作为基础镜像，并将其命名为 python
+FROM python:${PYTHON_VERSION} as python
+
+# 定义构建阶段，基于前面定义的 python 镜像，将这个阶段命名为 python-build-stage
+FROM python as python-build-stage
+
+# 设置环境变量 PYTHONDONTWRITEBYTECODE，用于防止 Python 在编译时生成 .pyc 文件
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# 更新 apt 软件包列表并安装必要的依赖项
+RUN apt-get update && apt-get install --no-install-recommends -y \
+  # 用于构建 Python 包的编译工具
+  build-essential \
+  # MySQL 客户端库的开发依赖
+  default-libmysqlclient-dev \
+  # 清理不需要的文件，减少镜像大小
+  && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
+  && rm -rf /var/lib/apt/lists/*
+
+# 将本地 requirements 文件夹中的内容复制到容器的 /requirements 目录中
+COPY ./requirements /requirements
+
+# 通过 pip wheel 命令将 requirements/local.txt 和 requirements/production.txt 中列出的 Python 依赖项构建为 wheel 文件，并存储在 /usr/src/app/wheels 目录中。然后删除 /requirements 目录
+RUN pip wheel --no-cache-dir --wheel-dir /usr/src/app/wheels  \
+  -r /requirements/local.txt -r /requirements/production.txt \
+  && rm -rf /requirements
+
+# 定义运行阶段，基于 python 镜像，命名为 python-run-stage
+FROM python as python-run-stage
+
+# 定义构建参数 BUILD_ENVIRONMENT，用于在不同的环境下构建镜像
+ARG BUILD_ENVIRONMENT
+
+# 设置环境变量 PYTHONUNBUFFERED，确保 Python 输出直接输出到终端而不是缓冲区，方便调试
+ENV PYTHONUNBUFFERED=1
+
+# 设置环境变量 PYTHONDONTWRITEBYTECODE，用于防止 Python 编译时生成 .pyc 文件
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# 更新 apt 软件包列表并安装以下软件包
+RUN apt-get update && apt-get install --no-install-recommends -y \
+  # 用于运行 Makefile 的工具
+  make \
+  # MySQL 客户端库的开发依赖
+  default-libmysqlclient-dev \
+  # 用于翻译处理
+  gettext \
+  # 也可以启用 Sphinx 的 LaTeX 和 PDF 输出工具
+  # texlive-latex-recommended \
+  # texlive-fonts-recommended \
+  # texlive-latex-extra \
+  # latexmk \
+  # 清理不需要的文件以减小镜像大小
+  && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
+  && rm -rf /var/lib/apt/lists/*
+
+# 从 python-build-stage 阶段将生成的 Python wheel 文件复制到当前阶段的 /wheels 目录
+COPY --from=python-build-stage /usr/src/app/wheels /wheels
+
+# 使用从 /wheels 目录中的 wheel 文件安装 Python 依赖项，安装完成后删除 /wheels 目录
+RUN pip install --no-cache /wheels/* && rm -rf /wheels
+
+# 将本地的 start 脚本复制到容器的 /start-docs 目录中
+COPY ./compose/local/docs/start /start-docs
+
+# 运行 sed 命令，去除 /start-docs 文件中的回车符（\r），使其格式适合 Unix 系统
+RUN sed -i 's/\r$//g' /start-docs
+
+# 赋予 /start-docs 文件执行权限
+RUN chmod +x /start-docs
+
+# 设置工作目录为 /docs
+WORKDIR /docs

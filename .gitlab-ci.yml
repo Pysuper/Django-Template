@@ -1,0 +1,37 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  # 定义全局变量
+  PYTHON_VERSION: "3.9"
+  DJANGO_SETTINGS_MODULE: "RBAC.settings"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+before_script:
+  # 安装 Python 和依赖
+  - apt-get update -y
+  - apt-get install -y python$PYTHON_VERSION python$PYTHON_VERSION-dev python3-pip
+  - python3 -m pip install --upgrade pip
+  - pip install -r requirements.txt
+
+test:
+  stage: test
+  script:
+    # 运行测试
+    - python manage.py test
+
+build:
+  stage: build
+  script:
+    # 构建步骤，例如收集静态文件
+    - python manage.py collectstatic --noinput
+
+deploy:
+  stage: deploy
+  script:
+    # 部署步骤，例如将代码推送到服务器
+    - echo "Deploying to production server..."
+  only:
+    - main  # 仅在 main 分支上执行部署

@@ -1,0 +1,86 @@
+version: '3'  # 使用 Docker Compose 文件的版本 3
+
+volumes:  # 定义持久化存储卷
+  backend_local_mysql_data: {}  # MySQL 数据卷
+  backend_local_mysql_data_backups: {}  # MySQL 备份数据卷
+
+services:  # 定义服务
+  django: &django  # Django 服务的基本配置
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/local/django/Dockerfile  # Dockerfile 的路径
+    image: backend_local_django  # 生成的镜像名称
+    container_name: backend_local_django  # 容器名称
+    platform: linux/x86_64  # 指定平台
+    depends_on:  # 依赖关系
+      - mysql  # 依赖 MySQL 服务
+      - redis  # 依赖 Redis 服务
+    volumes:
+      - .:/app:z  # 将当前目录挂载到容器的 /app 目录
+    env_file:  # 环境变量文件
+      - ./.envs/.local/.django  # Django 环境变量
+      - ./.envs/.local/.mysql  # MySQL 环境变量
+    ports:
+      - "8000:8000"  # 映射容器的 8000 端口到主机的 8000 端口
+    command: /start  # 容器启动时执行的命令
+
+  mysql:  # MySQL 服务
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/production/mysql/Dockerfile  # Dockerfile 的路径
+    image: backend_production_mysql  # 生成的镜像名称
+    container_name: mysql  # 容器名称
+    volumes:
+      - backend_local_mysql_data:/var/lib/mysql:z  # 持久化 MySQL 数据
+      - backend_local_mysql_data_backups:/backups:z  # 持久化 MySQL 备份数据
+    env_file:
+      - ./.envs/.local/.mysql  # MySQL 环境变量
+
+  docs:  # 文档服务
+    image: backend_local_docs  # 生成的镜像名称
+    container_name: backend_local_docs  # 容器名称
+    platform: linux/x86_64  # 指定平台
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/local/docs/Dockerfile  # Dockerfile 的路径
+    env_file:
+      - ./.envs/.local/.django  # Django 环境变量
+    volumes:
+      - ./docs:/docs:z  # 持久化文档目录
+      - ./config:/app/config:z  # 持久化配置目录
+      - ./apps:/app/apps:z  # 持久化应用目录
+    ports:
+      - "9000:9000"  # 映射容器的 9000 端口到主机的 9000 端口
+    command: /start-docs  # 容器启动时执行的命令
+
+  redis:  # Redis 服务
+    image: redis:6  # 使用 Redis 官方镜像
+    container_name: backend_local_redis  # 容器名称
+
+  celeryworker:  # Celery 工作进程
+    <<: *django  # 继承 Django 服务的配置
+    image: backend_local_celeryworker  # 生成的镜像名称
+    container_name: backend_local_celeryworker  # 容器名称
+    depends_on:
+      - redis  # 依赖 Redis 服务
+      - mysql  # 依赖 MySQL 服务
+    ports: []  # 没有暴露端口
+    command: /start-celeryworker  # 容器启动时执行的命令
+
+  celerybeat:  # Celery 定时任务
+    <<: *django  # 继承 Django 服务的配置
+    image: backend_local_celerybeat  # 生成的镜像名称
+    container_name: backend_local_celerybeat  # 容器名称
+    depends_on:
+      - redis  # 依赖 Redis 服务
+      - mysql  # 依赖 MySQL 服务
+    ports: []  # 没有暴露端口
+    command: /start-celerybeat  # 容器启动时执行的命令
+
+  flower:  # Celery 监控工具
+    <<: *django  # 继承 Django 服务的配置
+    image: backend_local_flower  # 生成的镜像名称
+    container_name: backend_local_flower  # 容器名称
+    ports:
+      - "5555:5555"  # 映射容器的 5555 端口到主机的 5555 端口
+    command: /start-flower  # 容器启动时执行的命令

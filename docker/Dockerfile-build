@@ -1,0 +1,22 @@
+# 使用基础镜像
+FROM 119.45.4.159:5601/affect/end:base
+
+# 设置工作目录
+WORKDIR /affect/back
+
+# 复制项目文件
+COPY . /affect/back/
+
+# 创建日志目录并设置权限
+RUN mkdir -p /var/log && \
+    touch /var/log/uwsgi.log && \
+    chown -R www-data:www-data /var/log/uwsgi.log /affect/back
+
+# 收集静态文件
+RUN python manage.py collectstatic --noinput
+
+# 暴露端口
+EXPOSE 8000
+
+# 使用uwsgi启动应用
+CMD ["uwsgi", "--ini", "deploy/uwsgi.ini"]

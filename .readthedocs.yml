@@ -1,0 +1,14 @@
+# Read the Docs 项目的配置文件，用于指定如何构建和部署文档
+
+version: 2  # 指定配置文件的版本，当前版本是 2
+
+sphinx:  # Sphinx 配置部分
+  configuration: docs/conf.py  # 指定 Sphinx 的配置文件路径
+
+build:  # 构建配置部分
+  image: testing  # 指定使用的构建镜像，可以是测试或生产环境的镜像
+
+python:  # Python 配置部分
+  version: 3.9  # 指定使用的 Python 版本
+  install:  # 安装依赖配置
+    - requirements: requirements/local.txt  # 指定安装依赖的 requirements 文件路径

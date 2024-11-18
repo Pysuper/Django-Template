@@ -1,0 +1,74 @@
+version: '3'  # 使用 Docker Compose 文件的版本 3
+
+volumes:  # 定义持久化存储卷
+  production_mysql_data: {}  # 生产环境 MySQL 数据卷
+  production_mysql_data_backups: {}  # 生产环境 MySQL 备份数据卷
+  production_traefik: {}  # Traefik 配置卷
+
+services:  # 定义服务
+  django: &django  # Django 服务的基本配置
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/production/django/Dockerfile  # Dockerfile 的路径
+    image: backend_production_django  # 生成的镜像名称
+    platform: linux/x86_64  # 指定平台
+    depends_on:  # 依赖关系
+      - mysql  # 依赖 MySQL 服务
+      - redis  # 依赖 Redis 服务
+    env_file:  # 环境变量文件
+      - ./.envs/.production/.django  # Django 环境变量
+      - ./.envs/.production/.mysql  # MySQL 环境变量
+    command: /start  # 容器启动时执行的命令
+
+  mysql:  # MySQL 服务
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/production/mysql/Dockerfile  # Dockerfile 的路径
+    image: backend_production_mysql  # 生成的镜像名称
+    container_name: mysql  # 容器名称
+    volumes:
+      - production_mysql_data:/var/lib/mysql:z  # 持久化 MySQL 数据
+      - production_mysql_data_backups:/backups:z  # 持久化 MySQL 备份数据
+    env_file:
+      - ./.envs/.production/.mysql  # MySQL 环境变量
+
+  traefik:  # Traefik 反向代理服务
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/production/traefik/Dockerfile  # Dockerfile 的路径
+    image: backend_production_traefik  # 生成的镜像名称
+    depends_on:
+      - django  # 依赖 Django 服务
+    volumes:
+      - production_traefik:/etc/traefik/acme:z  # Traefik 的 ACME 配置
+    ports:
+      - "0.0.0.0:80:80"  # 映射 HTTP 端口
+      - "0.0.0.0:443:443"  # 映射 HTTPS 端口
+      - "0.0.0.0:5555:5555"  # 映射 Traefik 的监控端口
+
+  redis:  # Redis 服务
+    image: redis:6  # 使用 Redis 官方镜像
+
+  celeryworker:  # Celery 工作进程
+    <<: *django  # 继承 Django 服务的配置
+    image: backend_production_celeryworker  # 生成的镜像名称
+    command: /start-celeryworker  # 容器启动时执行的命令
+
+  celerybeat:  # Celery 定时任务
+    <<: *django  # 继承 Django 服务的配置
+    image: backend_production_celerybeat  # 生成的镜像名称
+    command: /start-celerybeat  # 容器启动时执行的命令
+
+  flower:  # Celery 监控工具
+    <<: *django  # 继承 Django 服务的配置
+    image: backend_production_flower  # 生成的镜像名称
+    command: /start-flower  # 容器启动时执行的命令
+
+  awscli:  # AWS CLI 工具服务
+    build:
+      context: .  # 构建上下文目录
+      dockerfile: ./compose/production/aws/Dockerfile  # Dockerfile 的路径
+    env_file:
+      - ./.envs/.production/.django  # Django 环境变量
+    volumes:
+      - production_postgres_data_backups:/backups:z  # 持久化备份数据

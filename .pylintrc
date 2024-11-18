@@ -1,0 +1,18 @@
+# Pylint 的配置文件，用于设置 Pylint 的行为和选项
+# 以便根据项目的具体需求和团队的编码风格进行代码分析和检查
+
+[MASTER]
+load-plugins=pylint_django, pylint_celery  # 加载 Django 和 Celery 的 Pylint 插件
+django-settings-module=config.settings.local  # 指定 Django 的设置模块
+
+[FORMAT]
+max-line-length=120  # 设置最大行长度为 120 个字符
+
+[MESSAGES CONTROL]
+disable=missing-docstring,invalid-name  # 禁用缺少文档字符串和无效名称的警告
+
+[DESIGN]
+max-parents=13  # 设置类的最大父类数量为 13
+
+[TYPECHECK]
+generated-members=REQUEST,acl_users,aq_parent,"[a-zA-Z]+_set{1,2}",save,delete  # 指定 Pylint 在类型检查时忽略的生成成员

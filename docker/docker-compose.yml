@@ -1,0 +1,32 @@
+services:
+  backend:
+#    image: end:1.0
+    image: end:${END_IMAGE_VERSION}
+    container_name: end
+    hostname: end
+    ports:
+      - "5044:8000"
+    volumes:
+      - ./log:/affect/back/log
+      - ./static:/affect/back/static
+      - ./media:/affect/back/media
+
+  frontend:
+    image: front:${FRONT_IMAGE_VERSION}
+    container_name: front
+    hostname: front
+    ports:
+      - "7001:7001"
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx_end
+    hostname: nginx
+    ports:
+      - "7000:7000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - backend
+      - frontend
+    command: nginx -g "daemon off;"

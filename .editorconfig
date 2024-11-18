@@ -1,0 +1,31 @@
+# 统一代码格式化和风格的配置文件
+root = true
+
+[*]
+# 文件编码
+charset = utf-8
+# 使用 Unix 风格的换行符
+end_of_line = lf
+# 保留文件末尾的空行
+insert_final_newline = true
+# 忽略注释
+trim_trailing_whitespace = true
+
+# 指定文件格式的锁进
+[*.{py,rst,ini}]
+indent_style = space
+indent_size = 4
+
+[*.{html,css,scss,json,yml,xml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
+
+[nginx.conf]
+indent_style = space
+indent_size = 2

@@ -1,0 +1,42 @@
+# 定义和管理 Git 提交前的钩子（hooks）
+# 它是 Pre-Commit 工具的配置文件，主要用于在代码提交时自动执行一系列代码质量检查和格式化工具
+
+exclude: "^docs/|/migrations/"  # 排除 docs/ 和 migrations/ 目录中的文件
+default_stages: [commit]  # 默认在提交阶段执行钩子
+
+repos:  # 定义使用的预提交钩子仓库
+  - repo: https://github.com/pre-commit/pre-commit-hooks  # 第一个钩子仓库
+    rev: v4.3.0  # 使用的版本
+    hooks:  # 钩子列表
+      - id: trailing-whitespace  # 检查并删除尾随空格
+      - id: end-of-file-fixer  # 确保文件以换行符结束
+      - id: check-yaml  # 检查 YAML 文件的有效性
+
+  - repo: https://github.com/asottile/pyupgrade  # 第二个钩子仓库
+    rev: v2.38.2  # 使用的版本
+    hooks:  # 钩子列表
+      - id: pyupgrade  # 自动升级 Python 代码
+        args: [--py39-plus]  # 允许使用 Python 3.9 及以上的特性
+
+  - repo: https://github.com/psf/black  # 第三个钩子仓库
+    rev: 22.8.0  # 使用的版本
+    hooks:  # 钩子列表
+      - id: black  # 使用 Black 工具格式化 Python 代码
+
+  - repo: https://github.com/PyCQA/isort  # 第四个钩子仓库
+    rev: 5.10.1  # 使用的版本
+    hooks:  # 钩子列表
+      - id: isort  # 排序和优化 Python 导入语句
+
+  - repo: https://github.com/PyCQA/flake8  # 第五个钩子仓库
+    rev: 5.0.4  # 使用的版本
+    hooks:  # 钩子列表
+      - id: flake8  # 运行 Flake8 进行代码风格和语法检查
+        args: ["--config=setup.cfg"]  # 使用指定的配置文件
+        additional_dependencies: [flake8-isort]  # 添加 flake8-isort 作为额外依赖
+
+ci:  # 持续集成相关配置
+  autoupdate_schedule: weekly  # 设置自动更新计划为每周
+  skip: []  # 定义跳过的内容（目前为空）
+  submodules: false  # 不处理子模块
+
