@@ -4,20 +4,17 @@ from .base import env
 # GENERAL
 # ------------------------------------------------------------------------------
 DEBUG = True
-SECRET_KEY = env(
-    "DJANGO_SECRET_KEY",
-    default="fqmGV7RmY715h6IMpkdU2g1q0E5yP7yb8k12Rq0x8sqdREFK29OBisYO2ME1c4d4",
-)
+SECRET_KEY = env("DJANGO_SECRET_KEY")
 
 # CACHES
 # ------------------------------------------------------------------------------
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": env("REDIS_URL", default="redis://:redis_QjjNJH@119.45.4.159:16379/7"),
+        "LOCATION": env("REDIS_URL"),
         "CONNECTION_POOL_KWARGS": {"max_connections": 100},
         "OPTIONS": {
-            "PASSWORD": env("REDIS_PASSWORD", default="redis_QjjNJH"),
+            "PASSWORD": env("REDIS_PASSWORD"),
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
             "CONNECTION_POOL_KWARGS": {"max_connections": 100},
         },
@@ -41,8 +38,8 @@ DEBUG_TOOLBAR_CONFIG = {
 
 INTERNAL_IPS = [
     "127.0.0.1",
-    "10.0.2.2",
-    "119.45.4.159",
+    "localhost",
+    # your local IP address
 ]
 if env("USE_DOCKER", default="yes") == "yes":
     import socket
