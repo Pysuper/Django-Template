@@ -62,7 +62,7 @@ DATABASE_APPS_MAPPING = {
     # 'app_name':'database_name',
     "indicator": "postkeeper",
 }
-
+# 默认自动字段设置为 BigAutoField
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # URLS
@@ -142,8 +142,8 @@ AUTH_PASSWORD_VALIDATORS = [
 MIDDLEWARE = [
     # "allauth.account.middleware.AccountMiddleware",
     "corsheaders.middleware.CorsMiddleware",
-    "utils.middleware.JWTAuthenticationMiddleware",  #  自定义JWT认证中间件
-    "utils.middleware.DisableCSRFCheck",  #  禁用 CSRF 验证
+    "utils.middleware.JWTAuthenticationMiddleware",  # 自定义JWT认证中间件
+    "utils.middleware.DisableCSRFCheck",  # 禁用 CSRF 验证
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.gzip.GZipMiddleware",  # gzip 压缩"
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -234,9 +234,7 @@ EMAIL_TIMEOUT = 5
 # ADMIN
 # ------------------------------------------------------------------------------
 ADMIN_URL = "admin/"
-ADMINS = [
-    ("""PySuper""", "small.spider.p@gmail.com"),
-]
+ADMINS = [("""PySuper""", "small.spider.p@gmail.com")]
 MANAGERS = ADMINS
 
 # LOGGING
@@ -463,7 +461,7 @@ LOGGING = {
 # ------------------------------------------------------------------------------
 if USE_TZ:
     CELERY_TIMEZONE = TIME_ZONE
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://:redis_yJpScr@119.45.4.159:16379/8")
+CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
@@ -471,7 +469,6 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TASK_TIME_LIMIT = 5 * 60
 CELERY_TASK_SOFT_TIME_LIMIT = 60
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
-
 
 # CORS
 ALLOWED_HOSTS = ["*"]
@@ -566,7 +563,6 @@ REST_FRAMEWORK = {
     # "DEFAULT_SCHEMA_CLASS": "config.extend_schema.CustomAutoSchema",
 }
 
-
 SPECTACULAR_SETTINGS = {
     "TITLE": "Backend API",
     "DESCRIPTION": "Documentation of API endpoints of Backend",
@@ -615,7 +611,7 @@ def read_key(file_path):
 # RSA 密钥配置，解密用户密码
 RSA_PUBLIC_KEY = read_key(str(ROOT_DIR / "config/settings/pub.key"))
 RSA_PRIVATE_KEY = read_key(str(ROOT_DIR / "config/settings/pri.key"))
-RSA_PASSWORD = "affect-ai"
+RSA_PASSWORD = "your_ras_password"
 
 # 用户缓存默认闲置时间，单位：秒
 USER_CACHE_IDLE_TIME = 3600
@@ -659,5 +655,13 @@ SIMPLE_JWT = {
 # 设置文件上传下载读写权限
 FILE_UPLOAD_PERMISSIONS = 0o666
 
-# 默认自动字段设置为 BigAutoField
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+# 短信验证码相关
+ALI_SMS_ACCESS_KEY_ID = "your_access_key_id"  # 阿里云短信 Access Key ID
+ALI_SMS_ACCESS_KEY_SECRET = "your_access_key_secret"  # 阿里云短信 Access Key Secret
+ALI_SMS_REGION_ID = "cn-hangzhou"  # 阿里云短信 Region ID
+ALI_SMS_ENDPOINT = "dysmsapi.aliyuncs.com"  # 阿里云短信 API 地址
+ALI_SMS_SIGN_NAME = "your_sms_sign_name"  # 短信签名
+ALI_SMS_CODE_TEMPLATE = "your_template_code"  # 短信模板CODE
+SMS_CODE_KEY = "sms_code_"  # 短信验证码前缀
+SMS_CODE_EXPIRE = 600  # 短信验证码过期时间（秒）
+SMS_CODE_LENGTH = 6  # 短信验证码长度

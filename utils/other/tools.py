@@ -1,3 +1,5 @@
+import random
+
 import inflection
 
 
@@ -12,7 +14,7 @@ def convert_dict_keys_to_camel_case(data):
         new_data = {}
         for k, v in data.items():
             # 仅在需要时转换键
-            new_key = inflection.camelize(k, uppercase_first_letter=False) if '_' in k else k
+            new_key = inflection.camelize(k, uppercase_first_letter=False) if "_" in k else k
             # 递归转换字典中的值
             new_data[new_key] = convert_dict_keys_to_camel_case(v)
         return new_data
@@ -23,3 +25,13 @@ def convert_dict_keys_to_camel_case(data):
     else:
         # 返回原始数据
         return data
+
+
+def code_number(ln: int):
+    """
+    生成随机数字字符串
+    :param ln: 长度
+    :return: str
+    """
+    # 使用列表生成式优化随机数字生成
+    return "".join(random.choice("0123456789") for _ in range(ln))

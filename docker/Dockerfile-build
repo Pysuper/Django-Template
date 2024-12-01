@@ -1,5 +1,5 @@
 # 使用基础镜像
-FROM 119.45.4.159:5601/affect/end:base
+FROM your_harbor_registry/your_project/affect/end:base
 
 # 设置工作目录
 WORKDIR /affect/back

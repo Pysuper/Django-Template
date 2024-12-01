@@ -1,4 +1,4 @@
-hostname: 119.45.4.159
+hostname: your_harbor_ip_address
 
 http:
   port: 5601
@@ -10,7 +10,7 @@ http:
 harbor_admin_password: Harbor12345
 
 database:
-  password: root123
+  password: root12345
   max_idle_conns: 100
   max_open_conns: 900
   conn_max_lifetime: 5m
