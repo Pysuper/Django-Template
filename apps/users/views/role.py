@@ -3,8 +3,8 @@ from rest_framework.decorators import action
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from utils.baseDRF import CoreViewSet
-from utils.custom import RbacPermission
-from utils.response import JsonResult
+from utils.custom import RolePermission
+from utils.response import ApiResponse
 from ..models import Role
 from ..serializers.role import RoleListSerializer, RoleModifySerializer, RoleSerializer
 
@@ -18,7 +18,7 @@ class RoleViewSet(CoreViewSet):
     filterset_fields = ["status"]
     queryset = Role.objects.all()
     serializer_class = RoleListSerializer
-    permission_classes = (RbacPermission,)
+    permission_classes = (RolePermission,)
     authentication_classes = (JWTAuthentication,)
 
     def update(self, request, *args, **kwargs):
@@ -41,4 +41,4 @@ class RoleViewSet(CoreViewSet):
         返回全部的角色信息
         """
         serializer = self.get_serializer(self.queryset, many=True)
-        return JsonResult(data=serializer.data, msg="获取成功", code=200, status=status.HTTP_200_OK)
+        return ApiResponse(data=serializer.data, msg="获取成功", code=200, status=status.HTTP_200_OK)

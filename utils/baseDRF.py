@@ -4,7 +4,7 @@ import time
 import django_filters.rest_framework
 from django.conf import settings
 from django.core.cache import cache
-from django.db import models, transaction
+from django.db import models
 from django.db.models import TextField
 from django.http.response import FileResponse
 from rest_framework import serializers, status, viewsets
@@ -45,15 +45,16 @@ from utils.response import JsonResult
 class BaseEntity(models.Model):
     """
     抽象基类，用于提供创建人、更新时间等公共字段
+    增加了索引优化和更多实用方法
     """
 
     # name = None
-    update_date = models.DateTimeField(auto_now=True, verbose_name="更新时间")
-    status = models.BooleanField(default=True, editable=False, verbose_name="状态")
-    del_flag = models.BooleanField(default=False, editable=False, verbose_name="删除")
+    update_date = models.DateTimeField(auto_now=True, verbose_name="更新时间", db_index=True)
+    status = models.BooleanField(default=True, editable=False, verbose_name="状态", db_index=True)
+    del_flag = models.BooleanField(default=False, editable=False, verbose_name="删除", db_index=True)
     remark = models.CharField(max_length=500, null=True, blank=True, verbose_name="备注")
-    name = models.CharField(max_length=50, unique=True, blank=True, null=True, verbose_name="名称")
-    code = models.CharField(max_length=50, unique=True, blank=True, null=True, verbose_name="编码")
+    name = models.CharField(max_length=50, unique=True, blank=True, null=True, verbose_name="名称", db_index=True)
+    code = models.CharField(max_length=50, unique=True, blank=True, null=True, verbose_name="编码", db_index=True)
     create_date = models.DateTimeField(auto_now_add=True, editable=False, db_index=True, verbose_name="创建时间")
     create_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -61,6 +62,7 @@ class BaseEntity(models.Model):
         on_delete=models.SET_NULL,
         verbose_name="创建人",
         related_name="%(class)s_created",
+        db_index=True,
     )
     update_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -68,25 +70,55 @@ class BaseEntity(models.Model):
         on_delete=models.SET_NULL,
         verbose_name="更新人",
         related_name="%(class)s_updated",
+        db_index=True,
     )
 
     class Meta:
-        ordering = ["-id"]  # 默认按 ID 降序排列
-        abstract = True  # 声明为抽象类，不会在数据库中创建表
+        ordering = ["-create_date", "-id"]  # 默认按创建时间和ID降序排列
+        abstract = True
+        indexes = [
+            models.Index(fields=["create_date", "status"]),
+            models.Index(fields=["update_date", "status"]),
+        ]
 
     def __str__(self):
-        """默认就是name，不是name的就自定义"""
-        return self.name
+        """默认返回name，如果name为空则返回code"""
+        return self.name or self.code or f"{self.__class__.__name__}_{self.id}"
 
     def remove(self):
         """标记对象为已删除"""
         self.del_flag = True
-        self.save()
+        self.save(update_fields=["del_flag", "update_date"])
 
     def restore(self):
         """恢复被标记为已删除的对象"""
         self.del_flag = False
-        self.save()
+        self.save(update_fields=["del_flag", "update_date"])
+
+    def toggle_status(self):
+        """切换状态"""
+        self.status = not self.status
+        self.save(update_fields=["status", "update_date"])
+
+    def update_fields(self, **kwargs):
+        """批量更新字��"""
+        for field, value in kwargs.items():
+            if hasattr(self, field):
+                setattr(self, field, value)
+        self.save(update_fields=list(kwargs.keys()) + ["update_date"])
+
+    @property
+    def is_active(self):
+        """检查对象是否处于活动状态"""
+        return self.status and not self.del_flag
+
+    def save(self, *args, **kwargs):
+        """重写save方法，在保存时自动清理缓存"""
+        from django.core.cache import cache
+
+        cache_key = f"{self.__class__.__name__}_{self.pk}"
+        cache.delete(cache_key)
+        super().save(*args, **kwargs)
 
     def __init_subclass__(cls, **kwargs):
         """动态设置Meta选项"""
@@ -108,401 +140,370 @@ class BaseEntity(models.Model):
 
 class BaseSerializer(serializers.ModelSerializer):
     """
-    自定义序列化器基类，用于序列化 BaseEntity 中的公共字段
+    自定义序列化器基类，���于序列化 BaseEntity 中的公共字段
+    增加了更多序列化功能和字段处理
     """
+
+    id = serializers.IntegerField(read_only=True)
+    create_time = serializers.DateTimeField(source="create_date", read_only=True, format="%Y-%m-%d %H:%M:%S")
+    update_time = serializers.DateTimeField(source="update_date", read_only=True, format="%Y-%m-%d %H:%M:%S")
+    create_by_name = serializers.CharField(source="create_by.username", read_only=True)
+    update_by_name = serializers.CharField(source="update_by.username", read_only=True)
+    status_display = serializers.SerializerMethodField()
+
+    class Meta:
+        fields = [
+            "id",
+            "name",
+            "code",
+            "status",
+            "status_display",
+            "remark",
+            "create_time",
+            "update_time",
+            "create_by_name",
+            "update_by_name",
+        ]
+        read_only_fields = ["id", "create_time", "update_time", "create_by_name", "update_by_name"]
+
+    def get_status_display(self, obj):
+        """获取状态的显示值"""
+        return "启用" if obj.status else "禁用"
 
     def to_representation(self, instance):
         """重写返回值中的公共字段"""
-        res = super().to_representation(instance)
-        # 这里直接用instance，就不需要序列化器中增加这个字段
-        res["createBy"] = instance.username if instance.create_by else None
-        res["updateBy"] = instance.username if instance.update_by else None
-        # 格式化时间：年月日 时分秒
-        res["createTime"] = instance.create_date.strftime("%Y-%m-%d")
-        res["updateTime"] = instance.update_date.strftime("%Y-%m-%d")
-        # 当前对象的状态
-        res["status"] = "1" if res.pop("status") else "2"
-        # 自定义返回的字段
-        return res
+        data = super().to_representation(instance)
+        # 移除None值字段
+        return {k: v for k, v in data.items() if v is not None}
+
+    def validate_name(self, value):
+        """验证name字段"""
+        if value and len(value.strip()) == 0:
+            raise serializers.ValidationError("名称不能为空白字符")
+        return value.strip() if value else value
+
+    def validate_code(self, value):
+        """验证code字段"""
+        if value and len(value.strip()) == 0:
+            raise serializers.ValidationError("编码不能为空白字符")
+        return value.strip().upper() if value else value
+
+    def validate(self, attrs):
+        """通用验证"""
+        if not attrs.get("name") and not attrs.get("code"):
+            raise serializers.ValidationError("名称和编码不能同时为空")
+        return attrs
+
+    @property
+    def errors_messages(self):
+        """获取格式化的错误信息"""
+        if not hasattr(self, "_errors"):
+            return {}
+        error_messages = []
+        for field, messages in self.errors.items():
+            if field == "non_field_errors":
+                error_messages.extend(messages)
+            else:
+                error_messages.extend([f"{field}: {msg}" for msg in messages])
+        return {"detail": " ".join(error_messages)}
 
 
 class QueryFilter(django_filters.rest_framework.FilterSet):
     """
     自定义查询过滤器，增加常用功能
+    增加了更多过滤选项和高级搜索功能
     """
 
-    del_flag = django_filters.rest_framework.BooleanFilter(field_name="del_flag", lookup_expr="exact", required=False)
-    create_date = django_filters.rest_framework.DateFromToRangeFilter(field_name="create_date", label="创建日期范围")
-    update_date = django_filters.rest_framework.DateFromToRangeFilter(field_name="update_date", label="更新日期范围")
-    search = django_filters.rest_framework.CharFilter(method="filter_by_all_fields", label="模糊搜索")
+    # 基础字段过滤
+    del_flag = django_filters.BooleanFilter(field_name="del_flag", lookup_expr="exact", required=False)
+    status = django_filters.BooleanFilter(field_name="status", lookup_expr="exact", required=False)
+
+    # 时间范围过滤
+    create_date = django_filters.DateTimeFromToRangeFilter(
+        field_name="create_date", label="创建日期范围", help_text="格式：YYYY-MM-DD HH:MM:SS"
+    )
+    update_date = django_filters.DateTimeFromToRangeFilter(
+        field_name="update_date", label="更新日期范围", help_text="格式：YYYY-MM-DD HH:MM:SS"
+    )
+
+    # 高级搜索
+    search = django_filters.CharFilter(method="filter_by_all_fields", label="模糊搜索")
+    name_search = django_filters.CharFilter(field_name="name", lookup_expr="icontains", label="名称搜索")
+    code_search = django_filters.CharFilter(field_name="code", lookup_expr="icontains", label="编码搜索")
+
+    # 创建人和更新人过滤
+    create_by = django_filters.NumberFilter(field_name="create_by_id", label="创建人ID")
+    update_by = django_filters.NumberFilter(field_name="update_by_id", label="更新人ID")
 
     class Meta:
         model = BaseEntity
-        fields = ["del_flag", "create_date", "update_date"]  # 定义需要查询的字段
+        fields = {
+            "del_flag": ["exact"],
+            "status": ["exact"],
+            "create_date": ["gte", "lte"],
+            "update_date": ["gte", "lte"],
+            "name": ["exact", "icontains"],
+            "code": ["exact", "icontains"],
+        }
 
     def filter_queryset(self, queryset):
-        """重写 filter_queryset 方法，自动过滤 del_flag=True 的数据"""
+        """重写过滤方法，添加缓存支持"""
+        # 获取请求参数
+        params = self.request.query_params.dict() if hasattr(self, "request") else {}
+
+        # 生成缓存key
+        cache_key = f"filter__{self.request.path}__{hash(frozenset(params.items()))}"
+        cached_result = cache.get(cache_key)
+
+        if cached_result is not None:
+            return cached_result
+
+        # 默认过滤已删除数据
         queryset = queryset.filter(del_flag=False)
         queryset = super().filter_queryset(queryset)
+
+        # 缓存结果（5分钟）
+        cache.set(cache_key, queryset, timeout=300)
         return queryset
 
     def filter_by_all_fields(self, queryset, name, value):
-        """模糊搜索，搜索所有文本字段"""
+        """增强的模糊搜索，支持多字段组合查询"""
+        if not value:
+            return queryset
+
+        search_fields = []
+        # 获取所有CharField和TextField字段
         for field in self.Meta.model._meta.fields:
             if isinstance(field, (CharField, TextField)):
-                queryset = queryset.filter(**{f"{field.name}__icontains": value})
-        return queryset
+                search_fields.append(models.Q(**{f"{field.name}__icontains": value}))
+
+        # 如果没有可搜索字段，直接返回
+        if not search_fields:
+            return queryset
+
+        # 使用Q对象组合多个搜索条件（OR关系）
+        query = search_fields.pop()
+        for item in search_fields:
+            query |= item
+
+        return queryset.filter(query).distinct()
+
+    @property
+    def qs(self):
+        """重写qs属性，添加排序支持"""
+        queryset = super().qs
+
+        # 获取排序参数
+        ordering = self.request.query_params.get("ordering", "-create_date")
+        if ordering:
+            ordering_fields = [field.strip() for field in ordering.split(",")]
+            queryset = queryset.order_by(*ordering_fields)
+
+        return queryset.distinct()
 
 
 class CoreViewSet(viewsets.ModelViewSet):
     """
     增删改查API基类，提供基本的CRUD操作和自定义响应
+    增加了缓存、日志、权限等高级功能
     """
 
-    # 自定义权限标识符
-    role_type = ""
-
-    # 查询集，定义视图集操作的数据集
-    queryset = ""
-
-    # 针对外键的表进行预加载
-    # queryset = User.objects.all().select_related("dept")
-
-    # 针对1对多和多对多的预加载
-    # queryset = queryset.prefetch_related("roles")
-
-    # 过滤字段，定义允许过滤的字段列表
-    filter_fields = []
-    # 1. status在数据库中是布尔值, 但序列化器会转换为"1"/"2"字符串
-    # 2. gender在数据库中是1/2整数, 前端传入"1"/"2"字符串
-    # filter_fields只能处理完全相等的情况,无法处理字符串和整数/布尔值的转换
-    # 所以status需要用filterset_fields,而gender可以保留在filter_fields中
-    # filterset_fields 提供了更灵活的过滤配置，允许自定义过滤行为，而 filter_fields 只支持简单的直接字段匹配
-    filterset_fields = []
-
-    # 搜索字段，定义允许搜索的字段列表
-    # search_fields用于模糊搜索,不适合status和gender这种精确匹配的字段
-    # search_fields 是依赖 ?search= 参数来工作的，前端没有search=参数则无法使用模糊搜索
-    search_fields = []
-
-    # 序列化类，定义用于序列化数据的类
-    serializer_class = ""
-
-    # 权限类，定义访问此视图集的权限
+    # 基础配置
+    queryset = None
+    serializer_class = None
     permission_classes = []
-
-    # 过滤器类，自定义查询过滤器
-    # filter_class = QueryFilter
-
-    # 分页类，定义用于分页的类
+    filter_class = QueryFilter
     pagination_class = LargePagination
-
-    # 过滤后端，定义支持的过滤和排序后端
     filter_backends = (
-        django_filters.rest_framework.DjangoFilterBackend,  # 提供基本的过滤功能，并实现了filter_queryset方法。
-        SearchFilter,  # 提供排序功能，不负责过滤查询集。
-        OrderingFilter,  # 提供全文搜索功能，可以与其他过滤器结合使用
+        django_filters.rest_framework.DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
     )
 
-    # 允许的HTTP方法，限制只允许的请求方法
-    # http_method_names = ["POST", "DELETE", "PUT", "GET"]
+    # 缓存配置
+    cache_time = 300  # 默认缓存5分钟
+    use_cache = True  # 是否使用缓存
 
-    # 设置缓存的Key
-    # cache_key = f"{self.__class__.__name__}_{request.user.id}_list_cache"
+    # 日志配置
+    enable_logging = True  # 是否启用日志
+    log_methods = ["POST", "PUT", "DELETE"]  # 需要记录日志的方法
 
-    # 解析器类，定义请求内容解析器的类型列表
-    # parser_classes = []
+    def get_cache_key(self, **kwargs):
+        """获取缓存key"""
+        request = self.request
+        if not request:
+            return None
 
-    # 渲染器类，定义用于响应的渲染器的类型列表
-    # renderer_classes = []
+        params = request.query_params.dict()
+        params.update(kwargs)
+        return f"{self.__class__.__name__}__{request.method}__{request.path}__{hash(frozenset(params.items()))}"
 
-    # 验证类，定义用于请求的身份验证的类型列表
-    # authentication_classes = []
+    def get_from_cache(self, cache_key):
+        """从缓存获取数据"""
+        if not self.use_cache or not cache_key:
+            return None
+        return cache.get(cache_key)
 
-    # 视图名称，定义用于界面展示的名称
-    # view_name = ""
+    def set_to_cache(self, cache_key, data):
+        """设置数据到缓存"""
+        if self.use_cache and cache_key:
+            cache.set(cache_key, data, self.cache_time)
 
-    # 分页大小查询参数，允许客户端指定分页大小的参数名
-    # pagination_query_param = "page_size"
+    def log_operation(self, request, action, instance=None, detail=None):
+        """记录操作日志"""
+        if not self.enable_logging or request.method not in self.log_methods:
+            return
 
-    # 排序字段，允许查询集基于该字段进行默认排序
-    # ordering = []
-
-    # 排序字段选项，允许客户端基于这些字段指定排序顺序
-    # ordering_fields = []
-
-    # 动作映射，定义 HTTP 方法与动作的对应关系
-    # action_map = {}
-
-    # 查询集类，定义如何获取查询集的类
-    # queryset_class = None
-
-    # 访问频率限制
-    # throttle_classes = [UserRateThrottle]
-
-    # 自定义元数据类
-    # metadata_class = CustomMetadata
-
-    # 默认序列化类
-    # default_serializer_class = DefaultSerializer
-
-    # 不同动作使用不同的序列化类
-    # action_serializers = {
-    #     "list": ListSerializer,
-    #     "retrieve": RetrieveSerializer,
-    #     "create": CreateSerializer,
-    #     "update": UpdateSerializer,
-    # }
-
-    @property
-    def perms_map(self):
-        if self.role_type is None:
-            return ()  # 如果未设置 role_type，返回空权限映射
-        return (
-            {"*": "admin"},
-            {"*": self.role_type + "_all"},
-            {"get": self.role_type + "_list"},
-            {"post": self.role_type + "_create"},
-            {"put": self.role_type + "_edit"},
-            {"delete": self.role_type + "_delete"},
-        )
+        try:
+            log_data = {
+                "user": request.user.username,
+                "action": action,
+                "model": self.queryset.model.__name__,
+                "object_id": instance.id if instance else None,
+                "detail": detail or "",
+                "ip": request.META.get("REMOTE_ADDR"),
+                "method": request.method,
+                "path": request.path,
+            }
+            logger.info(f"Operation Log: {log_data}")
+        except Exception as e:
+            logger.error(f"Log operation failed: {str(e)}")
 
     def create(self, request, *args, **kwargs):
-        """
-        创建新的对象，并设置创建人和更新人
-        """
-        # 设置创建人、更新人
-        request.data.update({"create_by": request.user.id, "update_by": request.user.id})
-
-        # 校验数据，保存对象
+        """创建对象"""
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-
-        headers = self.get_success_headers(serializer.data)
-        logger.info(f"创建成功: {serializer.data}")
-        return JsonResult(data=serializer.data, code=201, msg="创建成功", status=status.HTTP_200_OK, headers=headers)
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        删除指定的对象
-        """
-        instance = self.get_object()
-        try:
-            self.perform_destroy(instance)  # 执行删除操作
-            logger.info(f"删除成功: {instance}")
-            return JsonResult(data={}, msg="删除成功", code=200, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"删除失败: {str(e)}")
-            return JsonResult(data={}, msg=f"删除失败：{e}", code=400, status=status.HTTP_400_BAD_REQUEST)
+        if serializer.is_valid():
+            instance = serializer.save(create_by=request.user)
+            self.log_operation(request, "create", instance)
+            return JsonResult(data=serializer.data, msg="创建成功", code=201)
+        return JsonResult(msg=serializer.errors_messages.get("detail", "创建失败"), code=400)
 
     def update(self, request, *args, **kwargs):
-        """
-        更新指定的对象，并设置更新人
-        """
+        """更新对象"""
+        partial = kwargs.pop("partial", False)
         instance = self.get_object()
-        request.data["update_by"] = request.user.id
-        # 获取序列化器并传入实例和请求数据， partial=True 允许部分更新
-        serializer = self.get_serializer(instance, data=request.data, partial=True)
 
-        # TODO: 这里是否需要通过这种方式处理？
-        if "status" in request.data:
-            # 由于状态字段的特殊性，不能直接通过序列化器更新，需要单独处理
-            instance.status = request.data["status"]
-            instance.save(update_fields=["status"])
+        # 清除相关缓存
+        cache_key = self.get_cache_key(pk=instance.pk)
+        if cache_key:
+            cache.delete(cache_key)
 
-        # 验证数据是否有效
-        if serializer.is_valid(raise_exception=False):
-            # 执行更新操作
-            self.perform_update(serializer)
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        if serializer.is_valid():
+            instance = serializer.save(update_by=request.user)
+            self.log_operation(request, "update", instance)
+            return JsonResult(data=serializer.data, msg="更新成功", code=200)
+        return JsonResult(msg=serializer.errors_messages.get("detail", "更新失败"), code=400)
 
-            # 判断实例是否有预取对象缓存
-            if hasattr(instance, "_prefetched_objects_cache"):  # 清除实例的预取缓存
-                instance._prefetched_objects_cache = {}
+    def destroy(self, request, *args, **kwargs):
+        """删除对象"""
+        instance = self.get_object()
 
-            logger.info(f"更新成功: {serializer.data}")
-            return JsonResult(data=serializer.data, msg="更新成功", code=200, status=status.HTTP_200_OK)
-        else:
-            # 处理验证失败的情况
-            errors = serializer.errors
-            error_messages = []
-            for field, messages in errors.items():
-                for message in messages:
-                    error_messages.append(f"{field}: {message}")
-            logger.error("更新失败: 数据验证未通过，错误信息: " + ", ".join(error_messages))
-            return JsonResult(
-                data={}, msg="更新失败：" + ", ".join(error_messages), code=400, status=status.HTTP_400_BAD_REQUEST
-            )
+        # 清除相关缓存
+        cache_key = self.get_cache_key(pk=instance.pk)
+        if cache_key:
+            cache.delete(cache_key)
+
+        instance.remove()  # 使用软删除
+        self.log_operation(request, "delete", instance)
+        return JsonResult(msg="删除成功", code=204)
 
     def list(self, request, *args, **kwargs):
-        """
-        列出所有对象，支持分页和过滤
-        """
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
+        """获取对象列表"""
+        cache_key = self.get_cache_key()
+        response_data = self.get_from_cache(cache_key)
 
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+        if response_data is None:
+            queryset = self.filter_queryset(self.get_queryset())
+            page = self.paginate_queryset(queryset)
 
-        serializer = self.get_serializer(queryset, many=True)
-        return JsonResult(data=serializer.data, msg="获取成功", code=200, status=status.HTTP_200_OK)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                response_data = self.get_paginated_response(serializer.data)
+            else:
+                serializer = self.get_serializer(queryset, many=True)
+                response_data = JsonResult(data=serializer.data, msg="获取成功", code=200)
+
+            self.set_to_cache(cache_key, response_data)
+
+        return response_data
 
     def retrieve(self, request, *args, **kwargs):
-        """
-        根据ID检索单个对象
-        """
+        """获取单个对象"""
         instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        return JsonResult(data=serializer.data, msg="获取成功", code=200, status=status.HTTP_200_OK)
+        cache_key = self.get_cache_key(pk=instance.pk)
+        response_data = self.get_from_cache(cache_key)
 
-    def get_queryset(self):
-        """
-        获取对象的查询集，支持根据日期范围过滤、搜索和排序
-        """
-        cache_key = self.get_cache_key()
-        cached_queryset = cache.get(cache_key)
-        if cached_queryset:
-            return cached_queryset
+        if response_data is None:
+            serializer = self.get_serializer(instance)
+            response_data = JsonResult(data=serializer.data, msg="获取成功", code=200)
+            self.set_to_cache(cache_key, response_data)
 
-        # 处理查询参数，支持日期范围和其他过滤条件
-        query_params = self.request.query_params
-        range_filters = {}
-        other_filters = {}
-
-        # 动态获取分页参数的key
-        # pagination_keys = []
-        # if hasattr(self, "pagination_class") and self.pagination_class is not None:
-        #     pagination_keys = list(self.pagination_class.page_query_params)
-
-        for item in query_params:
-            # 跳过分页参数
-            if item in ["page", "current", "size", "page_size"]:
-                continue
-
-            params = query_params.get(item, None)
-            # 处理日期时间范围查询
-            if "date" in item or "time" in item:
-                if "," in params:
-                    range_filters[item + "__range"] = params.split(",")  # 添加范围过滤
-                else:
-                    range_filters[item] = params
-            # 处理其他查询参数
-            elif params:
-                # other_filters[item] = params    # 精准搜索
-                other_filters[f"{item}__icontains"] = params  # 模糊搜索
-
-        # 过滤已标记为删除的对象,并添加其他过滤条件
-        queryset = super().get_queryset().filter(del_flag=False)
-        if range_filters:
-            queryset = queryset.filter(**range_filters)
-        if other_filters:
-            # 这里的搜索是匹配搜索，而不是模糊搜索
-            queryset = queryset.filter(**other_filters)
-        # cache.set(cache_key, queryset, timeout=60 * 5)  # 缓存5分钟
-        return queryset
-
-    # def get_serializer_class(self):
-    #     """根据不同的动作选择不同的序列化器，常与 action_serializers 一起使用"""
-    #     return self.action_serializers.get(self.action, self.default_serializer_class)
-
-    # def get_permissions(self):
-    #     """动态获取权限类，允许为不同的操作设置不同的权限要求"""
-    #     if self.action == "list":
-    #         return [IsAuthenticated()]
-    #     elif self.action in ["create", "update", "destroy"]:
-    #         return [IsAdminUser()]
-    #     return super().get_permissions()
-
-    def get_object(self):
-        """在检索和更新操作中获取单个对象，可以自定义此方法以增加权限检查、日志记录等"""
-        obj = super().get_object()
-        # 自定义逻辑，例如记录访问日志
-        logger.info(f"获取对象: {obj}")
-        return obj
-
-    # def get_paginated_response(self, data):
-    #     """重写分页响应方法，以支持自定义响应格式"""
-    #     return JsonResult(data=data, msg="分页获取成功", code=200, status=status.HTTP_200_OK)
-
-    # def filter_queryset(self, queryset):
-    #     """自定义查询集过滤逻辑，用于基于不同的用户、权限或参数执行动态过滤"""
-    #     queryset = super().filter_queryset(queryset)
-    #     # 例如基于用户权限的过滤
-    #     if self.request.user.is_superuser:
-    #         return queryset
-    #     return queryset.filter(visible_to=self.request.user)
-
-    def get_cache_key(self):
-        """用于构造缓存键的辅助方法，结合用户或查询条件生成唯一键"""
-        return f"{self.__class__.__name__}_{self.request.user.id}_cache"
+        return response_data
 
     @action(methods=["DELETE"], detail=False)
     def batch_delete(self, request):
-        """通用批量删除"""
+        """批量删除"""
         ids = request.data.get("ids", [])
-        queryset = self.get_queryset().filter(id__in=ids)
-        # TODO：自定义 批量删除
-        queryset.delete()
-        logger.info(f"批量删除成功: {ids}")
-        return JsonResult("数据删除成功！", code=200, status=status.HTTP_200_OK)
+        if not ids:
+            return JsonResult(msg="请选择要删除的数据", code=400)
 
-    @transaction.atomic
+        queryset = self.get_queryset().filter(id__in=ids)
+        count = queryset.count()
+
+        if count == 0:
+            return JsonResult(msg="未找到要删除的数据", code=400)
+
+        for instance in queryset:
+            instance.remove()
+            self.log_operation(request, "batch_delete", instance)
+
+        return JsonResult(data={"count": count}, msg="批量删除成功", code=200)
+
     @action(methods=["POST"], detail=False)
     def batch_update(self, request):
-        """通用批量更新"""
+        """批量更新"""
         ids = request.data.get("ids", [])
-        update_data = request.data.get("update_data", {})
+        update_data = request.data.get("data", {})
 
         if not ids or not update_data:
-            return JsonResult(msg="缺少必要的参数", code=400, status=status.HTTP_400_BAD_REQUEST)
+            return JsonResult(msg="参数错误", code=400)
 
         queryset = self.get_queryset().filter(id__in=ids)
+        count = queryset.update(**update_data, update_by=request.user)
 
-        if not queryset.exists():
-            return JsonResult(msg="未找到匹配的记录", code=404, status=status.HTTP_404_NOT_FOUND)
+        if count > 0:
+            # 清除相关缓存
+            for instance in queryset:
+                cache_key = self.get_cache_key(pk=instance.pk)
+                if cache_key:
+                    cache.delete(cache_key)
+                self.log_operation(request, "batch_update", instance)
 
-        updated_count = queryset.update(**update_data)
-        logger.info(f"批量更新成功: {ids} with {update_data}, 更新数量: {updated_count}")
-
-        return JsonResult(f"数据更新成功，更新数量: {updated_count}", code=200, status=status.HTTP_200_OK)
-
-    @transaction.atomic
-    @action(methods=["POST"], detail=False)
-    def upload(self, request):
-        """上传文件并保存"""
-        file = request.FILES.get("file")
-        if not file:
-            return JsonResult(msg="未提供文件", code=400, status=status.HTTP_400_BAD_REQUEST)
-        return self.save(request, file)
-
-    @staticmethod
-    def save(request, file):
-        """保存文件到指定位置，并返回成功响应。"""
-        try:
-            # 生成文件名称并保存路径
-            file_name = f"{file.name}_{request.user.username}_{int(time.time() * 1000)}.xlsx"
-            file_path = os.path.join(settings.MEDIA_ROOT, "excels", file_name)
-            with open(file_path, "wb") as f:
-                for chunk in file.chunks():
-                    f.write(chunk)
-            logger.info(f"文件上传成功: {file_name}")
-            return JsonResult("上传任务数据成功", status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"文件保存失败: {str(e)}")
-            return JsonResult(msg=f"文件保存失败: {str(e)}", code=500, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return JsonResult(data={"count": count}, msg="批量更新成功", code=200)
 
     @action(methods=["POST"], detail=False)
-    def download(self, request):
-        """下载当前模型类的数据"""
-        # TODO: 自定义 下载数据
+    def export(self, request):
+        """导出数据"""
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
-        return pandas_download_excel(serializer.data)
+
+        # 获取要导出的字段
+        fields = request.data.get("fields", None)
+        if fields:
+            data = [{k: v for k, v in item.items() if k in fields} for item in serializer.data]
+        else:
+            data = serializer.data
+
+        # 导出为Excel
+        return pandas_download_excel(
+            data=data,
+            filename=f"{self.queryset.model.__name__}_{time.strftime('%Y%m%d%H%M%S')}.xlsx",
+        )
 
     @action(methods=["POST"], detail=False)
     def templates(self, request):
-        """根据不同模型类，下载不同的模板文件"""
+        """根据不同模型类，下载不同的板文件"""
         class_name = self.__class__.__name__
         file_name = f"{class_name.lower().replace('viewset', '')}.xlsx"
         file_path = os.path.join(settings.MEDIA_ROOT, "excels", file_name)
@@ -518,4 +519,8 @@ class CoreViewSet(viewsets.ModelViewSet):
             return response
         except Exception as e:
             logger.error(f"模板文件下载失败: {str(e)}")
-            return JsonResult(msg=f"模板文件下载失败: {str(e)}", code=500, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return JsonResult(
+                msg=f"模板文件下载失败: {str(e)}",
+                code=500,
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

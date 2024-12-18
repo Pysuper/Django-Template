@@ -6,9 +6,9 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from utils.baseDRF import CoreViewSet
-from utils.custom import RbacPermission
+from utils.custom import RolePermission
 from utils.error import ErrorCode
-from utils.response import JsonResult
+from utils.response import ApiResponse
 from utils.views import TreeAPIView
 from ..models import Dept
 from ..serializers.dept import DeptSerializer, DeptUserTreeSerializer
@@ -22,13 +22,13 @@ class DeptViewSet(CoreViewSet, TreeAPIView):
     ordering_fields = ("id",)
     queryset = Dept.objects.all()
     serializer_class = DeptSerializer
-    permission_classes = (RbacPermission,)
+    permission_classes = (RolePermission,)
     authentication_classes = (JWTAuthentication,)
     filter_backends = (SearchFilter, OrderingFilter)
 
     @action(methods=["GET"], detail=False)
     def pages(self, request):
-        return JsonResult(
+        return ApiResponse(
             data=[
                 "home",
                 "403",
@@ -47,7 +47,7 @@ class DeptViewSet(CoreViewSet, TreeAPIView):
                 "manage_user-detail",
                 "about",
             ],
-            status=ErrorCode.OK,
+            status=ErrorCode.SUCCESS,
         )
 
     @action(methods=["POST"], detail=False)

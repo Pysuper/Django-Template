@@ -1,50 +1,72 @@
 from collections import OrderedDict
-from typing import List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
+from django.contrib.auth import get_user_model
+from django.core.cache import cache
+from django.db.models import Model, QuerySet
+from django.http import HttpRequest
+from django.utils.translation import gettext as _
+from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
+from rest_framework.serializers import ModelSerializer
+
+User = get_user_model()
 
 
-class CorePagination(PageNumberPagination):
-    """分页设置"""
+class CustomModelSerializer(ModelSerializer):
+    """自定义模型序列化器"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.request = self.context.get("request")
+        self.user = self.request.user if self.request else None
+
+    def validate(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
+        """数据验证"""
+        # 创建时自动添加创建者
+        if not self.instance and self.user and hasattr(self.Meta.model, "create_by"):
+            attrs["create_by"] = self.user
+
+        # 更新时自动添加更新者
+        if self.instance and self.user and hasattr(self.Meta.model, "update_by"):
+            attrs["update_by"] = self.user
+            attrs["update_time"] = datetime.now()
+
+        return super().validate(attrs)
+
+
+class CustomPagination(PageNumberPagination):
+    """自定义分页器"""
 
     page_size = 10
     page_size_query_param = "size"
-    max_page_size = 100
+    max_page_size = 1000
+    page_query_param = "page"
 
-
-class LargePagination(PageNumberPagination):
-    """自定义分页类，支持动态页面大小"""
-
-    # 定义前端分页参数名称
-    page_query_params = "current"
-
-    # 允许通过 URL 查询参数 'size' 动态设置页面大小
-    page_size = 10
-    page_size_query_param = "size"
-    max_page_size = 100
-
-    def get_paginated_response(self, data):
-        """返回分页后的响应，包含自定义的响应格式"""
-        # 使用三元表达式简化 code 和 msg 的赋值逻辑
-        code = 200 if data else 404
-        msg = "请求成功" if data else "数据请求失败"
-
-        # TODO： 自定义ViewSet分页响应
+    def get_paginated_response(self, data: List[Dict[str, Any]]) -> Response:
+        """自定义分页响应格式"""
         return Response(
             OrderedDict(
                 [
-                    ("code", code),
-                    ("msg", msg),
+                    ("code", status.HTTP_200_OK),
+                    ("message", _("获取成功")),
                     (
                         "data",
                         OrderedDict(
                             [
-                                ("records", data),
-                                ("current", self.page.number),
-                                ("size", self.page_size),
-                                ("total", self.page.paginator.count),
+                                ("list", data),
+                                (
+                                    "pagination",
+                                    {
+                                        "page": self.page.number,
+                                        "size": self.page_size,
+                                        "total": self.page.paginator.count,
+                                        "pages": self.page.paginator.num_pages,
+                                    },
+                                ),
                             ]
                         ),
                     ),
@@ -52,182 +74,207 @@ class LargePagination(PageNumberPagination):
             )
         )
 
-    # 动态获取前端分页参数名称
-    def get_page_query_param(self):
-        """
-        获取 URL 上的 'current' 参数，如果没有 'current' 参数，返回 'current' 作为默认值
-        :return:
-        """
-        return self.page_query_params or "current"
 
+class LargePagination(CustomPagination):
+    """大数据分页器"""
 
-class RbacPermission(BasePermission):
-    """
-    自定义权限类，基于用户角色权限控制。
-    """
+    page_size = 50
+    max_page_size = 5000
 
-    @classmethod
-    def get_permission_from_role(cls, request) -> Optional[List[str]]:
-        """
-        获取用户角色的权限，去重
-        :param request: 请求对象
-        :return: 权限列表或 None
-        """
-        if not request.user.is_authenticated:
+    def paginate_queryset(self, queryset: QuerySet, request: HttpRequest, view=None) -> Optional[List[Any]]:
+        """分页查询优化"""
+        if not self.get_page_size(request):
             return None
-        return list(request.user.roles.values_list("perms__method", flat=True).distinct())
 
-    def has_permission(self, request, view) -> bool:
-        """
-        权限校验逻辑
-        :param request: 请求对象
-        :param view: 视图对象
-        :return: 是否有权限
-        """
-        perms = self.get_permission_from_role(request) or []
+        paginator = self.django_paginator_class(queryset.only("id"), self.get_page_size(request))  # 只查询ID
+        page_number = request.query_params.get(self.page_query_param, 1)
 
-        if "admin" in perms:
-            return True  # 管理员直接拥有所有权限
+        try:
+            self.page = paginator.page(page_number)
+        except Exception as e:
+            from utils.log.logger import logger
 
-        # 如果视图没有权限映射，直接返回有权限
-        if not hasattr(view, "perms_map"):
+            logger.warning(f"分页错误: {str(e)}")
+            self.page = paginator.page(1)
+
+        # 获取完整数据
+        ids = [obj.id for obj in self.page]
+        self.page.object_list = queryset.filter(id__in=ids)
+
+        return list(self.page)
+
+
+class RolePermission(BasePermission):
+    """角色权限控制"""
+
+    def has_permission(self, request: HttpRequest, view: Any) -> bool:
+        """检查权限"""
+        # 超级管理员拥有所有权限
+        if request.user.is_superuser:
             return True
 
-        # 获取请求方法
-        method = request.method.lower()
+        # 获取用户角色权限
+        perms = self.get_role_permissions(request.user)
+        if not perms:
+            return False
 
-        # 校验权限
-        return any(
-            (method == method_key or method_key == "*") and alias in perms
-            for perm_map in view.perms_map
-            for method_key, alias in perm_map.items()
-        )
+        # 检查视图权限
+        required_perms = self.get_view_permissions(view)
+        if not required_perms:
+            return True
 
-    '''
-    @classmethod
-    def get_permission_from_role(self, request):
-        """
-        根据用户角色获取权限列表，返回字典，路径为键，允许的HTTP方法为值。
-        """
-        if request.user:
-            try:
-                perms_dict = defaultdict(set)
-                # 获取用户角色的所有权限信息，并去重
-                perms = request.user.roles.values(
-                    "permissions__menus__path",  # 权限对应的菜单路径
-                    "permissions__method",  # 权限允许的HTTP方法（如GET、POST、PUT等）
-                ).distinct()
+        return any(perm in perms for perm in required_perms)
 
-                # 遍历权限数据，为用户的每个菜单路径设置对应的允许方法
-                for item in perms:
-                    # 获取权限中的HTTP方法，如GET、POST、PUT等
-                    method = item["permissions__method"].split("_")[
-                        -1
-                    ]  # 处理权限方法名称（从类似"PERM_GET"中获取"GET"）
+    def get_role_permissions(self, user: User) -> List[str]:
+        """获取用户角色权限"""
+        # 尝试从缓存获取
+        cache_key = f"user_perms_{user.id}"
+        perms = cache.get(cache_key)
+        if perms is not None:
+            return perms
 
-                    if method == "ALL":  # 如果权限方法是"ALL"，表示允许所有操作
-                        perms_dict[item["permissions__menus__path"]].update(
-                            {"GET", "POST", "PUT", "DELETE"}
-                        )  # 允许所有HTTP方法
-                    else:
-                        perms_dict[item["permissions__menus__path"]].add(method)  # 向对应菜单路径添加指定的HTTP方法
+        # 从数据库获取
+        perms = list(user.roles.values_list("permissions__code", flat=True).distinct())
 
-                return perms_dict  # 返回包含路径和允许方法的权限字典
-            except AttributeError:
-                # 处理用户角色或权限不存在的情况，返回None
-                return None
-        return None
+        # 缓存权限
+        cache.set(cache_key, perms, timeout=300)  # 缓存5分钟
 
-    def has_permission(self, request, view):
-        """
-        核心权限检查逻辑，判断当前用户是否有权限访问请求的视图。
-        """
-        # 获取当前用户的权限信息
-        self.get_permission_from_role(request)
+        return perms
 
-        # TODO: 这里可以添加实际的权限校验逻辑，当前逻辑默认返回True，允许所有请求。
-        # 获取当前用户的权限信息
-        # request_perms = self.get_permission_from_role(request)
-        # 可以根据实际需求将注释部分取消注释，添加实际权限判断逻辑：
-        # if request_perms:
-        #     # 提取请求URL路径，进行权限匹配
-        #     request_url = request._request.path_info.split('/')[2]  # 这里假设路径是 "/api/路径/..." 格式，提取第二段作为菜单路径
-        #
-        #     # SAFEMETHOD 定义了一些不需要权限的安全方法，如HEAD、OPTIONS
-        #     SAFEMETHOD = ('HEAD', 'OPTIONS')
-        #
-        #     # 如果用户有ADMIN权限，默认允许所有操作
-        #     if 'ADMIN' in request_perms[None]:
-        #         return True
-        #     # 如果用户有访问请求URL的权限，允许访问
-        #     elif request._request.method in request_perms[request_url]:
-        #         return True
-        #     # 如果请求的是安全方法，允许访问
-        #     elif request._request.method in SAFEMETHOD:
-        #         return True
+    def get_view_permissions(self, view: Any) -> List[str]:
+        """获取视图所需权限"""
+        if not hasattr(view, "permission_required"):
+            return []
 
-        # 目前默认返回True，表示允许所有请求
+        if isinstance(view.permission_required, str):
+            return [view.permission_required]
+
+        return list(view.permission_required)
+
+
+class DataPermission(BasePermission):
+    """数据权限控制"""
+
+    def has_permission(self, request: HttpRequest, view: Any) -> bool:
+        """检查数据权限"""
+        if request.user.is_superuser:
+            return True
+
+        if not hasattr(view, "data_scope_required"):
+            return True
+
+        return self.check_data_scope(request.user, view.data_scope_required)
+
+    def has_object_permission(self, request: HttpRequest, view: Any, obj: Model) -> bool:
+        """检查对象权限"""
+        if request.user.is_superuser:
+            return True
+
+        # 检查数据所有者
+        if hasattr(obj, "create_by") and obj.create_by == request.user:
+            return True
+
+        # 检查数据范围
+        if hasattr(view, "data_scope_required"):
+            return self.check_object_scope(request.user, obj, view.data_scope_required)
+
         return True
 
-    @classmethod
-    def get_permission_from_role(cls, request) -> Optional[List[str]]:
-        """
-        从用户角色中获取权限
-        :param request: 请求对象
-        :return: 权限列表或 None
-        """
-        try:
-            # 获取用户角色的权限，去重
-            return [p["perm__method"] for p in request.user.roles.values("perm__method").distinct()]
-        except AttributeError:
-            return None
+    def check_data_scope(self, user: User, required_scope: str) -> bool:
+        """检查数据范围"""
+        from utils.error import DataScopeEnum
 
-    def has_permission(self, request, view) -> bool:
-        """
-        权限校验逻辑
-        :param request: 请求对象
-        :param view: 视图对象
-        :return: 是否有权限
-        """
-        perms = self.get_permission_from_role(request) or []
+        # 获取用户数据范围
+        user_scope = self.get_user_data_scope(user)
+        if not user_scope:
+            return False
 
-        if "admin" in perms:
-            return True  # 管理员直接拥有所有权限
+        # 检查数据范围
+        scope_levels = {
+            DataScopeEnum.ALL.value: 0,
+            DataScopeEnum.DEPT_AND_CHILD.value: 1,
+            DataScopeEnum.DEPT.value: 2,
+            DataScopeEnum.SELF.value: 3,
+        }
 
-        # 如果视图没有权限映射，直接返回有权限
-        if not hasattr(view, "perms_map"):
+        return scope_levels.get(user_scope, 999) <= scope_levels.get(required_scope, 999)
+
+    def check_object_scope(self, user: User, obj: Model, required_scope: str) -> bool:
+        """检查对象范围"""
+        from utils.error import DataScopeEnum
+
+        # 获取用户数据范围
+        user_scope = self.get_user_data_scope(user)
+        if not user_scope:
+            return False
+
+        # 检查数据范围
+        if user_scope == DataScopeEnum.ALL.value:
             return True
 
-        # 获取请求方法
-        method = request.method.lower()
+        if user_scope == DataScopeEnum.DEPT_AND_CHILD.value:
+            return self.check_dept_and_child_scope(user, obj)
 
-        # 校验权限
-        return any(
-            (method == method_key or method_key == "*") and alias in perms
-            for perm_map in view.perms_map
-            for method_key, alias in perm_map.items()
+        if user_scope == DataScopeEnum.DEPT.value:
+            return self.check_dept_scope(user, obj)
+
+        if user_scope == DataScopeEnum.SELF.value:
+            return self.check_self_scope(user, obj)
+
+        return False
+
+    def get_user_data_scope(self, user: User) -> Optional[str]:
+        """获取用户数据范围"""
+        # 尝试从缓存获取
+        cache_key = f"user_scope_{user.id}"
+        scope = cache.get(cache_key)
+        if scope is not None:
+            return scope
+
+        # 从数据库获取
+        scope = user.roles.values_list("data_scope", flat=True).first()
+
+        # 缓存数据范围
+        cache.set(cache_key, scope, timeout=300)  # 缓存5分钟
+
+        return scope
+
+    def check_dept_and_child_scope(self, user: User, obj: Model) -> bool:
+        """检查部门及子部门范围"""
+        if not hasattr(obj, "dept"):
+            return False
+
+        return obj.dept.is_child_of(user.dept)
+
+    def check_dept_scope(self, user: User, obj: Model) -> bool:
+        """检查部门范围"""
+        if not hasattr(obj, "dept"):
+            return False
+
+        return obj.dept == user.dept
+
+    def check_self_scope(self, user: User, obj: Model) -> bool:
+        """检查个人范围"""
+        if hasattr(obj, "create_by"):
+            return obj.create_by == user
+
+        if hasattr(obj, "user"):
+            return obj.user == user
+
+        return False
+
+
+class CustomPermission(RolePermission, DataPermission):
+    """自定义权限"""
+
+    def has_permission(self, request: HttpRequest, view: Any) -> bool:
+        """检查权限"""
+        return super(RolePermission, self).has_permission(request, view) and super(DataPermission, self).has_permission(
+            request, view
         )
 
-    '''
-
-
-class ObjPermission(BasePermission):
-    """密码管理对象级权限控制"""
-
-    def has_object_permission(self, request, view, obj) -> bool:
-        """
-        检查用户是否有权限访问特定对象
-        :param request: 请求对象
-        :param view: 视图对象
-        :param obj: 要检查的对象
-        :return: 是否有权限
-        """
-        # 获取用户角色的权限
-        user_perms = RbacPermission.get_permission_from_role(request) or []
-
-        # 管理员拥有所有权限
-        if "admin" in user_perms:
-            return True
-
-        # 检查用户是否有权限访问特定对象
-        return request.user.id == obj.uid_id
+    def has_object_permission(self, request: HttpRequest, view: Any, obj: Model) -> bool:
+        """检查对象权限"""
+        return super(RolePermission, self).has_object_permission(request, view, obj) and super(
+            DataPermission, self
+        ).has_object_permission(request, view, obj)

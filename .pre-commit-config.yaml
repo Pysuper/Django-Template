@@ -6,34 +6,54 @@ default_stages: [commit]  # 默认在提交阶段执行钩子
 
 repos:  # 定义使用的预提交钩子仓库
   - repo: https://github.com/pre-commit/pre-commit-hooks  # 第一个钩子仓库
-    rev: v4.3.0  # 使用的版本
+    rev: v4.5.0  # 使用的版本
     hooks:  # 钩子列表
       - id: trailing-whitespace  # 检查并删除尾随空格
       - id: end-of-file-fixer  # 确保文件以换行符结束
       - id: check-yaml  # 检查 YAML 文件的有效性
+      - id: check-added-large-files  # 检查添加的大文件
+      - id: check-merge-conflict  # 检查合并冲突
+      - id: detect-private-key  # 检测私有密钥
+      - id: check-case-conflict  # 检查大小写冲突
+      - id: mixed-line-ending  # 检查混合行尾
 
-  - repo: https://github.com/asottile/pyupgrade  # 第二个钩子仓库
-    rev: v2.38.2  # 使用的版本
-    hooks:  # 钩子列表
-      - id: pyupgrade  # 自动升级 Python 代码
-        args: [--py39-plus]  # 允许使用 Python 3.9 及以上的特性
-
-  - repo: https://github.com/psf/black  # 第三个钩子仓库
-    rev: 22.8.0  # 使用的版本
+  - repo: https://github.com/psf/black  # 第二个钩子仓库
+    rev: 23.12.0  # 使用的版本
     hooks:  # 钩子列表
       - id: black  # 使用 Black 工具格式化 Python 代码
+        language_version: python3  # 指定使用的 Python 版本
 
-  - repo: https://github.com/PyCQA/isort  # 第四个钩子仓库
-    rev: 5.10.1  # 使用的版本
+  - repo: https://github.com/pycqa/isort  # 第四个钩子仓库
+    rev: 5.13.2  # 使用的版本
     hooks:  # 钩子列表
       - id: isort  # 排序和优化 Python 导入语句
+        args: ["--profile", "black"]  # 使用指定的配置文件和参数
 
-  - repo: https://github.com/PyCQA/flake8  # 第五个钩子仓库
-    rev: 5.0.4  # 使用的版本
+  - repo: https://github.com/pycqa/flake8  # 第五个钩子仓库
+    rev: 6.1.0  # 使用的版本
     hooks:  # 钩子列表
       - id: flake8  # 运行 Flake8 进行代码风格和语法检查
-        args: ["--config=setup.cfg"]  # 使用指定的配置文件
-        additional_dependencies: [flake8-isort]  # 添加 flake8-isort 作为额外依赖
+        additional_dependencies:  # 添加额外的依赖
+          - flake8-docstrings  # 添加 flake8-docstrings 作为额外依赖
+          - flake8-bugbear  # 添加 flake8-bugbear 作为额外依赖
+          - flake8-comprehensions  # 添加 flake8-comprehensions 作为额外依赖
+          - flake8-simplify  # 添加 flake8-simplify 作为额外依赖
+
+  - repo: https://github.com/pre-commit/mirrors-mypy  # 第六个钩子仓库
+    rev: v1.7.1  # 使用的版本
+    hooks:  # 钩子列表
+      - id: mypy  # 运行 mypy 进行类型检查
+        additional_dependencies:  # 添加额外的依赖
+          - types-all  # 添加 types-all 作为额外依赖
+        args: [--ignore-missing-imports]  # 使用指定的参数
+
+  - repo: https://github.com/PyCQA/bandit  # 第七个钩子仓库
+    rev: 1.7.5  # 使用的版本
+    hooks:  # 钩子列表
+      - id: bandit  # 运行 bandit 进行安全检查
+        args: ["-c", "pyproject.toml"]  # 使用指定的配置文件和参数
+        additional_dependencies:  # 添加额外的依赖
+          - bandit[toml]  # 添加 bandit[toml] 作为额外依赖
 
 ci:  # 持续集成相关配置
   autoupdate_schedule: weekly  # 设置自动更新计划为每周

@@ -2,9 +2,9 @@ from rest_framework.decorators import action
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from utils.baseDRF import CoreViewSet
-from utils.custom import RbacPermission
+from utils.custom import RolePermission
 from utils.error import ErrorCode
-from utils.response import JsonResult
+from utils.response import ApiResponse
 from utils.views import TreeAPIView
 from ..models import Menu
 from ..serializers.menu import MenuSerializer
@@ -18,12 +18,12 @@ class MenuViewSet(CoreViewSet, TreeAPIView):
     ordering_fields = ("sort", "id")
     queryset = Menu.objects.all()
     serializer_class = MenuSerializer
-    permission_classes = (RbacPermission,)
+    permission_classes = (RolePermission,)
     authentication_classes = (JWTAuthentication,)
 
     @action(methods=["GET"], detail=False)
     def pages(self, request):
-        return JsonResult(
+        return ApiResponse(
             data=[
                 "home",
                 "403",
@@ -42,7 +42,7 @@ class MenuViewSet(CoreViewSet, TreeAPIView):
                 "manage_user-detail",
                 "about",
             ],
-            status=ErrorCode.OK,
+            status=ErrorCode.SUCCESS,
         )
 
 

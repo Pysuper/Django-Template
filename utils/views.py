@@ -1,152 +1,295 @@
+import logging
 import os
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Type
 
+from django.core.cache import cache
 from django.db import transaction
-from django.db.models.query import QuerySet
+from django.db.models import Model, QuerySet
+from django.http import FileResponse, HttpRequest, StreamingHttpResponse
+from django.utils.decorators import method_decorator
+from django.utils.translation import gettext as _
+from django.views.decorators.cache import cache_page
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import serializers
+from rest_framework import serializers, status
+from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter, SearchFilter
-from rest_framework.generics import ListAPIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from utils.baseDRF import CoreViewSet
+from utils.decorators import handle_business_exceptions
+from utils.error import BusinessError, ErrorCode
+from utils.response import ApiResponse, success_response
 from utils.serializer import TreeSerializer
 
+logger = logging.getLogger(__name__)
 
-class FileViewSet(CoreViewSet):
-    """
-    公共附件管理视图集: 增删改查
-    """
 
-    queryset = ""
-    serializer_class = ""
-    search_fields = ()
-    filter_fields = ()
-    ordering_fields = ("id",)
-    # permission_classes = (RolePermission,)
+class StandardPagination(PageNumberPagination):
+    """标准分页器"""
+
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 1000
+    page_query_param = "page"
+
+
+class BaseViewSet(CoreViewSet):
+    """基础视图集"""
+
+    pagination_class = StandardPagination
+    permission_classes = (IsAuthenticated,)
     authentication_classes = (JWTAuthentication,)
     filter_backends = (DjangoFilterBackend, SearchFilter, OrderingFilter)
 
-    def __init__(self, model, attachment_url="url", **kwargs):
-        """
-        初始化 FileViewSet。
+    def get_serializer_context(self) -> Dict[str, Any]:
+        """获取序列化器上下文"""
+        context = super().get_serializer_context()
+        context.update({"request": self.request, "format": self.format_kwarg, "view": self})
+        return context
 
-        :param model: 附件模型
-        :param attachment_url: 附件 URL 字段名
-        """
+    @handle_business_exceptions()
+    def create(self, request: HttpRequest, *args, **kwargs) -> ApiResponse:
+        """创建资源"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        instance = self.perform_create(serializer)
+        return success_response(data=serializer.data, message=_("创建成功"), code=status.HTTP_201_CREATED)
+
+    @handle_business_exceptions()
+    def update(self, request: HttpRequest, *args, **kwargs) -> ApiResponse:
+        """更新资源"""
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return success_response(data=serializer.data, message=_("更新成功"))
+
+    @handle_business_exceptions()
+    def destroy(self, request: HttpRequest, *args, **kwargs) -> ApiResponse:
+        """删除资源"""
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return success_response(message=_("删除成功"))
+
+    def perform_create(self, serializer: serializers.Serializer) -> Model:
+        """执行创建"""
+        return serializer.save()
+
+    def perform_update(self, serializer: serializers.Serializer) -> Model:
+        """执行更新"""
+        return serializer.save()
+
+    def perform_destroy(self, instance: Model) -> None:
+        """执行删除"""
+        instance.delete()
+
+
+class FileViewSet(BaseViewSet):
+    """文件管理视图集"""
+
+    def __init__(self, model: Type[Model], file_field: str = "file", **kwargs):
         super().__init__(**kwargs)
-        self.model = model  # 附件模型
-        self.attachment_url = attachment_url  # 附件 URL 字段名
+        self.model = model
+        self.file_field = file_field
 
-    def get_queryset(self):
-        """获取所有附件的查询集"""
+    def get_queryset(self) -> QuerySet:
+        """获取查询集"""
         return self.model.objects.all()
 
-    def get_serializer_class(self):
-        """
-        动态获取序列化器类，根据附件模型生成序列化器
-        """
+    def get_serializer_class(self) -> Type[serializers.ModelSerializer]:
+        """获取序列化器类"""
         return type(
-            "AttachmentSerializer",
+            "FileSerializer",
             (serializers.ModelSerializer,),
             {"Meta": type("Meta", (object,), {"model": self.model, "fields": "__all__"})},
         )
 
+    @action(detail=True, methods=["get"])
+    def download(self, request: HttpRequest, pk: int = None) -> FileResponse:
+        """下载文件"""
+        instance = self.get_object()
+        file_field = getattr(instance, self.file_field)
+        if not file_field:
+            raise BusinessError(error_code=ErrorCode.RESOURCE_NOT_FOUND, message=_("文件不存在"))
+
+        response = FileResponse(file_field.open())
+        response["Content-Type"] = "application/octet-stream"
+        response["Content-Disposition"] = f'attachment; filename="{file_field.name}"'
+        return response
+
     @transaction.atomic
-    def destroy(self, request, *args, **kwargs):
-        """
-        删除指定的附件，包括物理文件的删除
-        """
-        pk = kwargs.get("pk")  # 从 URL 参数获取附件 ID
-        attachment = self.model.objects.get(id=pk)  # 获取附件实例
-
-        # 构建文件的完整路径
-        url = f"../media/{str(getattr(attachment, self.attachment_url))}"
-
-        # 检查文件是否存在并删除
-        if os.path.exists(url):
-            os.remove(url)
-            print("文件已删除")
-        else:
-            print("你要删除的文件不存在")
-
-        return super().destroy(request, *args, **kwargs)  # 调用父类的 destroy 方法
+    def perform_destroy(self, instance: Model) -> None:
+        """执行删除"""
+        file_field = getattr(instance, self.file_field)
+        if file_field:
+            file_path = file_field.path
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        super().perform_destroy(instance)
 
 
 class TreeAPIView(APIView):
-    """
-    自定义树结构View
-    """
+    """树形结构视图"""
 
-    queryset = None  # 默认查询集为None
-    permission_classes = (AllowAny,)  # 只有认证用户可以访问
-    authentication_classes = (JWTAuthentication,)  # 使用JWT认证
-    # permission_classes = (IsAuthenticated,)  # 只有认证用户可以访问
+    queryset = None
+    serializer_class = TreeSerializer
+    permission_classes = (IsAuthenticated,)
+    authentication_classes = (JWTAuthentication,)
+    cache_timeout = 300  # 缓存5分钟
 
-    def get_queryset(self):
-        """获取查询集，如果未定义，则抛出异常"""
-        assert self.queryset is not None, f"Check {self.__class__.__name__} `queryset` & `get_queryset()`"
-        if isinstance(self.queryset, QuerySet):
-            # 如果查询集是QuerySet类型，则返回所有记录
-            return self.queryset.all()
-        return self.queryset
+    def get_queryset(self) -> QuerySet:
+        """获取查询集"""
+        assert self.queryset is not None, f"{self.__class__.__name__} 必须设置 queryset 属性或重写 get_queryset() 方法"
+        return self.queryset.all() if isinstance(self.queryset, QuerySet) else self.queryset
 
-    def get(self, request):
-        """
-        处理GET请求，返回树形结构数据
-        """
-        data = self.get_queryset()  # 获取数据
-        serializer = TreeSerializer(data, many=True)  # 序列化数据
+    def get_cache_key(self) -> str:
+        """获取缓存键"""
+        return f"tree_data_{self.__class__.__name__}"
 
+    def get_tree_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """构建树形数据"""
         tree_dict = {}
         tree_data = []
 
-        # 将序列化后的数据存储在字典中，方便后续查找
-        for item in serializer.data:
+        # 构建节点字典
+        for item in data:
+            item["children"] = []
             tree_dict[item["id"]] = item
-            tree_dict[item["id"]]["children"] = []  # 初始化子节点列表
 
         # 构建树形结构
-        for item in tree_dict.values():
-            if item["pid"] is None:  # 如果没有父节点，则为根节点
+        for item in data:
+            parent_id = item.get("parent_id") or item.get("pid")
+            if parent_id is None:
                 tree_data.append(item)
             else:
-                # 如果有父节点，则将当前节点添加到其父节点的children中
-                parent = tree_dict.get(item["pid"])
-                if parent:  # 确保父节点存在
+                parent = tree_dict.get(parent_id)
+                if parent:
                     parent["children"].append(item)
 
-        return Response(tree_data)  # 返回构建好的树形结构
-
-
-class TreeTwoAPIView(ListAPIView):
-    """自定义树结构View"""
-
-    serializer_class = TreeSerializer
-    authentication_classes = (JWTAuthentication,)
-    permission_classes = (IsAuthenticated,)
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
-
-        serializer = self.get_serializer(queryset, many=True)
-        tree_data = self.build_tree(serializer.data)
-
-        return self.get_paginated_response(tree_data) if page is not None else Response(tree_data)
-
-    def build_tree(self, data: list) -> list:
-        """构建树结构数据"""
-        tree_dict = {item["id"]: {**item, "children": []} for item in data}
-        tree_data = []
-
-        for item in data:
-            pid = item["pid"]
-            if pid in tree_dict:
-                tree_dict[pid]["children"].append(tree_dict[item["id"]])
-            else:
-                tree_data.append(tree_dict[item["id"]])
-
         return tree_data
+
+    @method_decorator(cache_page(cache_timeout))
+    def get(self, request: HttpRequest) -> ApiResponse:
+        """获取树形数据"""
+        # 尝试从缓存获取
+        cache_key = self.get_cache_key()
+        tree_data = cache.get(cache_key)
+
+        if tree_data is None:
+            # 从数据库获取并构建树形数据
+            queryset = self.get_queryset()
+            serializer = self.serializer_class(queryset, many=True)
+            tree_data = self.get_tree_data(serializer.data)
+
+            # 缓存数据
+            cache.set(cache_key, tree_data, self.cache_timeout)
+
+        return success_response(data=tree_data)
+
+
+class CacheViewMixin:
+    """缓存视图混入类"""
+
+    cache_timeout = 300  # 缓存5分钟
+
+    def get_cache_key(self) -> str:
+        """获取缓存键"""
+        return f"view_data_{self.__class__.__name__}"
+
+    def get_cached_data(self) -> Optional[Any]:
+        """获取缓存数据"""
+        return cache.get(self.get_cache_key())
+
+    def set_cached_data(self, data: Any) -> None:
+        """设置缓存数据"""
+        cache.set(self.get_cache_key(), data, self.cache_timeout)
+
+
+class ExportMixin:
+    """导出功能混入类"""
+
+    export_serializer_class = None
+    export_filename = "export"
+    export_type = "xlsx"
+
+    def get_export_serializer_class(self) -> Type[serializers.Serializer]:
+        """获取导出序列化器类"""
+        assert self.export_serializer_class is not None, (
+            f"{self.__class__.__name__} 必须设置 export_serializer_class 属性"
+            "或重写 get_export_serializer_class() 方法"
+        )
+        return self.export_serializer_class
+
+    def get_export_filename(self) -> str:
+        """获取导出文件名"""
+        return f"{self.export_filename}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    def get_export_data(self, queryset: QuerySet) -> List[Dict[str, Any]]:
+        """获取导出数据"""
+        serializer_class = self.get_export_serializer_class()
+        serializer = serializer_class(queryset, many=True)
+        return serializer.data
+
+    @action(detail=False, methods=["get"])
+    def export(self, request: HttpRequest) -> StreamingHttpResponse:
+        """导出数据"""
+        queryset = self.filter_queryset(self.get_queryset())
+        data = self.get_export_data(queryset)
+
+        if self.export_type == "xlsx":
+            return self.export_xlsx(data)
+        elif self.export_type == "csv":
+            return self.export_csv(data)
+        else:
+            raise BusinessError(error_code=ErrorCode.PARAM_ERROR, message=_("不支持的导出类型"))
+
+    def export_xlsx(self, data: List[Dict[str, Any]]) -> StreamingHttpResponse:
+        """导出Excel"""
+        import xlsxwriter
+        from io import BytesIO
+
+        output = BytesIO()
+        workbook = xlsxwriter.Workbook(output)
+        worksheet = workbook.add_worksheet()
+
+        # 写入表头
+        headers = data[0].keys() if data else []
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header)
+
+        # 写入数据
+        for row, item in enumerate(data, 1):
+            for col, value in enumerate(item.values()):
+                worksheet.write(row, col, value)
+
+        workbook.close()
+        output.seek(0)
+
+        response = StreamingHttpResponse(
+            output, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = f'attachment; filename="{self.get_export_filename()}.xlsx"'
+        return response
+
+    def export_csv(self, data: List[Dict[str, Any]]) -> StreamingHttpResponse:
+        """导出CSV"""
+        import csv
+        from io import StringIO
+
+        output = StringIO()
+        writer = csv.DictWriter(output, fieldnames=data[0].keys() if data else [])
+
+        # 写入表头
+        writer.writeheader()
+
+        # 写入数据
+        writer.writerows(data)
+
+        response = StreamingHttpResponse(output.getvalue(), content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="{self.get_export_filename()}.csv"'
+        return response
