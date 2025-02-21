@@ -14,9 +14,9 @@ from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from utils.baseDRF import CoreViewSet
-from utils.custom import RbacPermission
+from utils.custom import RolePermission
 from utils.error import ErrorCode
-from utils.response import JsonResult
+from utils.response import ApiResponse
 from ..models import Menu, User
 from ..serializers.dept import UserSerializer
 from ..serializers.menu import MenuSerializer
@@ -69,14 +69,14 @@ class UserAuthView(APIView):
         user = authenticate(username=username, password=password)
         if user:
             ref_token = str(RefreshToken.for_user(user).access_token)
-            return JsonResult(
+            return ApiResponse(
                 status=ErrorCode.OK,
                 data={
                     "refreshToken": ref_token,
                     "token": ref_token,
                 },
             )
-        return JsonResult("用户名或密码错误!", status=403)
+        return ApiResponse("用户名或密码错误!", status=403)
 
     def get(self, request):
         """
@@ -95,8 +95,8 @@ class UserAuthView(APIView):
                 "roles": ["R_ADMIN", "R_SUPER"],
                 "buttons": ["B_CODE1", "B_CODE2", "B_CODE3"],
             }
-            return JsonResult(data=data, status=ErrorCode.OK)
-        return JsonResult("用户名或密码错误!", status=ErrorCode.FORBIDDEN)
+            return ApiResponse(data=data, status=ErrorCode.SUCCESS)
+        return ApiResponse("用户名或密码错误!", status=ErrorCode.PARAM_ERROR)
 
 
 class UserViewSet(CoreViewSet):
@@ -108,7 +108,7 @@ class UserViewSet(CoreViewSet):
     ordering_fields = ("id",)
     queryset = User.objects.all().select_related("dept")
     serializer_class = UserListSerializer
-    permission_classes = (RbacPermission,)
+    permission_classes = (RolePermission,)
     authentication_classes = (JWTAuthentication,)
     filter_backends = (DjangoFilterBackend, OrderingFilter)
     filter_fields = ["is_active", "department"]
@@ -146,7 +146,7 @@ class UserViewSet(CoreViewSet):
             or request.user.is_superuser
         ):
             if new_password1 != new_password2:
-                return Response({"detail": "新密码两次输入不一致!"}, status=ErrorCode.BAD_REQUEST)
+                return Response({"detail": "新密码两次输入不一致!"}, status=ErrorCode.PARAM_ERROR)
             user.set_password(new_password2)
             user.save()
             return Response({"detail": "密码修改成功!"})

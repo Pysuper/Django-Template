@@ -1,140 +1,231 @@
+from enum import Enum
+from typing import Any, Dict, Optional
+
 from rest_framework import status
 from rest_framework.exceptions import APIException
 
 
-# 自定义异常
-class CustomExceptionError(APIException):
-    pass
+class ErrorLevel(Enum):
+    """错误级别枚举"""
+
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
 
 
-class Success(CustomExceptionError):
-    status_code = 200
-    default_detail = "请求成功"
+class ErrorCode(Enum):
+    """错误码枚举"""
+
+    # 成功响应 (2xx)
+    SUCCESS = (200, "成功")
+    CREATED = (201, "已创建")
+    ACCEPTED = (202, "已接受")
+    NO_CONTENT = (204, "无内容")
+
+    # 认证和权限 (10xxx)
+    UNAUTHORIZED = (10001, "未经授权")
+    TOKEN_EXPIRED = (10002, "Token已过期")
+    TOKEN_INVALID = (10003, "Token无效")
+    PERMISSION_DENIED = (10004, "权限不足")
+    LOGIN_REQUIRED = (10005, "需要登录")
+    ACCOUNT_DISABLED = (10006, "账号已禁用")
+    ACCOUNT_LOCKED = (10007, "账号已锁定")
+
+    # 参数验证 (20xxx)
+    PARAM_ERROR = (20001, "参数错误")
+    PARAM_MISSING = (20002, "缺少必要参数")
+    PARAM_FORMAT = (20003, "参数格式错误")
+    PARAM_VALUE = (20004, "参数值错误")
+    PARAM_TYPE = (20005, "参数类型错误")
+
+    # 业务逻辑 (30xxx)
+    RESOURCE_NOT_FOUND = (30001, "资源不存在")
+    RESOURCE_ALREADY_EXISTS = (30002, "资源已存在")
+    RESOURCE_EXPIRED = (30003, "资源已过期")
+    OPERATION_FAILED = (30004, "操作失败")
+    STATUS_ERROR = (30005, "状态错误")
+
+    # 数据库相关 (40xxx)
+    DB_ERROR = (40001, "数据库错误")
+    DB_CONNECTION_ERROR = (40002, "数据库连接错误")
+    DB_DUPLICATE_KEY = (40003, "数据重复")
+    DB_INTEGRITY_ERROR = (40004, "数据完整性错误")
+    DB_TRANSACTION_ERROR = (40005, "事务处理错误")
+
+    # 第三方服务 (50xxx)
+    THIRD_PARTY_ERROR = (50001, "第三方服务错误")
+    API_REQUEST_ERROR = (50002, "API请求错误")
+    REMOTE_SERVICE_ERROR = (50003, "远程服务错误")
+    TIMEOUT_ERROR = (50004, "请求超时")
+
+    # 系统错误 (60xxx)
+    SYSTEM_ERROR = (60001, "系统错误")
+    CONFIG_ERROR = (60002, "配置错误")
+    NETWORK_ERROR = (60003, "网络错误")
+    FILE_ERROR = (60004, "文件处理错误")
+    CACHE_ERROR = (60005, "缓存错误")
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.message = message
 
 
-class Created(CustomExceptionError):
-    status_code = 201
-    default_detail = "资源已创建"
+class BaseError(APIException):
+    """基础错误类"""
+
+    def __init__(
+        self,
+        error_code: ErrorCode,
+        message: Optional[str] = None,
+        data: Any = None,
+        level: ErrorLevel = ErrorLevel.ERROR,
+        status_code: Optional[int] = None,
+        **kwargs,
+    ):
+        """
+        初始化错误对象
+        :param error_code: 错误码枚举
+        :param message: 自定义错误消息
+        :param data: 额外数据
+        :param level: 错误级别
+        :param status_code: HTTP状态码
+        :param kwargs: 其他参数
+        """
+        self.error_code = error_code
+        self.message = message or error_code.message
+        self.data = data
+        self.level = level
+        self.status_code = status_code or self._get_status_code()
+        self.kwargs = kwargs
+
+        super().__init__(detail=self.to_dict())
+
+    def _get_status_code(self) -> int:
+        """获取HTTP状态码"""
+        code = self.error_code.code
+        if code >= 60000:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR
+        elif code >= 50000:
+            return status.HTTP_502_BAD_GATEWAY
+        elif code >= 40000:
+            return status.HTTP_500_INTERNAL_SERVER_ERROR
+        elif code >= 30000:
+            return status.HTTP_400_BAD_REQUEST
+        elif code >= 20000:
+            return status.HTTP_400_BAD_REQUEST
+        elif code >= 10000:
+            return status.HTTP_401_UNAUTHORIZED
+        return status.HTTP_400_BAD_REQUEST
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        error_dict = {
+            "code": self.error_code.code,
+            "message": self.message,
+            "level": self.level.value,
+        }
+
+        if self.data is not None:
+            error_dict["data"] = self.data
+
+        if self.kwargs:
+            error_dict.update(self.kwargs)
+
+        return error_dict
 
 
-class NoContent(CustomExceptionError):
-    status_code = 204
-    default_detail = "无内容"
+# 认证相关错误
+class AuthenticationError(BaseError):
+    """认证相关错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.UNAUTHORIZED, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.WARNING, **kwargs)
 
 
-class ParamError(CustomExceptionError):
-    status_code = 400
-    default_detail = "请求无效，可能是参数错误"
+class PermissionError(BaseError):
+    """权限相关错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.PERMISSION_DENIED, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.WARNING, **kwargs)
 
 
-class Unauthorized(CustomExceptionError):
-    status_code = 401
-    default_detail = "未经授权，请重新登录"
+# 参数相关错误
+class ValidationError(BaseError):
+    """参数验证错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.PARAM_ERROR, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.WARNING, **kwargs)
 
 
-class PermissionDenied(CustomExceptionError):
-    status_code = 403
-    default_detail = "拒绝访问，权限不足"
+class ResourceError(BaseError):
+    """资源相关错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.RESOURCE_NOT_FOUND, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.WARNING, **kwargs)
 
 
-class ObjectNotFound(CustomExceptionError):
-    status_code = 404
-    default_detail = "请求的资源不存在"
+# 业务相关错误
+class BusinessError(BaseError):
+    """业务逻辑错误"""
+
+    def __init__(
+        self,
+        error_code: ErrorCode = ErrorCode.OPERATION_FAILED,
+        **kwargs,
+    ):
+        super().__init__(error_code=error_code, level=ErrorLevel.ERROR, **kwargs)
 
 
-class ServerError(CustomExceptionError):
-    status_code = 500
-    default_detail = "服务器内部错误"
+# 系统相关错误
+class SystemError(BaseError):
+    """系统错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.SYSTEM_ERROR, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.CRITICAL, **kwargs)
 
 
-class GatewayError(CustomExceptionError):
-    status_code = 502
-    default_detail = "网关错误"
+class DatabaseError(BaseError):
+    """数据库错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.DB_ERROR, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.CRITICAL, **kwargs)
 
 
-class ServiceUnavailable(CustomExceptionError):
-    status_code = 503
-    default_detail = "服务不可用，服务器暂时过载或维护中"
+class ThirdPartyError(BaseError):
+    """第三方服务错误"""
+
+    def __init__(self, error_code: ErrorCode = ErrorCode.THIRD_PARTY_ERROR, **kwargs):
+        super().__init__(error_code=error_code, level=ErrorLevel.ERROR, **kwargs)
 
 
-class GatewayTimeout(CustomExceptionError):
-    status_code = 504
-    default_detail = "网关超时"
+# 使用示例
+"""
+# 抛出认证错误
+raise AuthenticationError(
+    error_code=ErrorCode.TOKEN_EXPIRED,
+    message="您的登录已过期，请重新登录",
+    data={'expired_at': '2023-12-18 12:00:00'}
+)
 
+# 抛出参数验证错误
+raise ValidationError(
+    error_code=ErrorCode.PARAM_MISSING,
+    message="缺少必要参数：user_id",
+    data={'field': 'user_id'}
+)
 
-class SerializerError(CustomExceptionError):
-    status_code = 400
-    default_detail = "序列化错误"
+# 抛出业务错误
+raise BusinessError(
+    error_code=ErrorCode.OPERATION_FAILED,
+    message="订单创建失败：库存不足",
+    data={'product_id': 123, 'stock': 0}
+)
 
-
-class ErrorCode:
-    """
-    自定义 HTTP 状态码和错误码
-    """
-
-    # 认证相关 (10000-10999)
-    # UNAUTHORIZED = 10000  # 未登录
-    PERMISSION_DENIED = 10001  # 无权限
-    TOKEN_EXPIRED = 10002  # Token过期
-    TOKEN_INVALID = 10003  # Token无效
-
-    # 参数相关 (40000-40999)
-    PARAM_ERROR = 40000  # 参数验证错误
-    DATA_NOT_FOUND = 40001  # 未找到数据
-    DATA_NOT_VALID = 40002  # 数据错误
-    REPEAT_POST = 40003  # 重复提交
-    PARAM_MISSING = 40004  # 缺少必要参数
-    PARAM_FORMAT_ERROR = 40005  # 参数格式错误
-
-    # 业务相关 (50000-50999)
-    BUSINESS_ERROR = 50000  # 业务处理失败
-    RESOURCE_NOT_FOUND = 50001  # 资源不存在
-    RESOURCE_ALREADY_EXIST = 50002  # 资源已存在
-    OPERATION_FAILED = 50003  # 操作失败
-
-    # 系统相关 (60000-60999)
-    SYSTEM_ERROR = 60000  # 系统错误
-    # SERVICE_UNAVAILABLE = 60001  # 服务不可用
-    THIRD_PARTY_ERROR = 60002  # 第三方服务错误
-    DATABASE_ERROR = 60003  # 数据库错误
-    CACHE_ERROR = 60004  # 缓存错误
-
-    OK = status.HTTP_200_OK  # 请求成功
-    CREATED = status.HTTP_201_CREATED  # 资源创建成功
-    ACCEPTED = status.HTTP_202_ACCEPTED  # 请求已接受，但尚未处理完成
-    NO_CONTENT = status.HTTP_204_NO_CONTENT  # 请求成功但无内容返回
-    RESET_CONTENT = status.HTTP_205_RESET_CONTENT  # 请求成功，重置视图内容
-    PARTIAL_CONTENT = status.HTTP_206_PARTIAL_CONTENT  # 请求部分内容成功
-
-    # 重定向状态码
-    MOVED_PERMANENTLY = status.HTTP_301_MOVED_PERMANENTLY  # 资源已永久转移
-    FOUND = status.HTTP_302_FOUND  # 资源已临时转移
-    SEE_OTHER = status.HTTP_303_SEE_OTHER  # 请使用 GET 方法获取资源
-    NOT_MODIFIED = status.HTTP_304_NOT_MODIFIED  # 资源未被修改
-    TEMPORARY_REDIRECT = status.HTTP_307_TEMPORARY_REDIRECT  # 临时重定向
-    PERMANENT_REDIRECT = status.HTTP_308_PERMANENT_REDIRECT  # 永久重定向
-
-    # 客户端错误状态码
-    BAD_REQUEST = status.HTTP_400_BAD_REQUEST  # 请求格式错误
-    UNAUTHORIZED = status.HTTP_401_UNAUTHORIZED  # 未认证
-    FORBIDDEN = status.HTTP_403_FORBIDDEN  # 无权限
-    NOT_FOUND = status.HTTP_404_NOT_FOUND  # 资源未找到
-    METHOD_NOT_ALLOWED = status.HTTP_405_METHOD_NOT_ALLOWED  # 请求方法不被允许
-    NOT_ACCEPTABLE = status.HTTP_406_NOT_ACCEPTABLE  # 请求内容不可接受
-    REQUEST_TIMEOUT = status.HTTP_408_REQUEST_TIMEOUT  # 请求超时
-    CONFLICT = status.HTTP_409_CONFLICT  # 请求冲突，例如重复数据
-    GONE = status.HTTP_410_GONE  # 资源永久删除
-    LENGTH_REQUIRED = status.HTTP_411_LENGTH_REQUIRED  # 需要指定 Content-Length
-    PRECONDITION_FAILED = status.HTTP_412_PRECONDITION_FAILED  # 前提条件未满足
-    PAYLOAD_TOO_LARGE = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE  # 请求实体过大
-    URI_TOO_LONG = status.HTTP_414_REQUEST_URI_TOO_LONG  # URI 过长
-    UNSUPPORTED_MEDIA_TYPE = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE  # 不支持的媒体类型
-    TOO_MANY_REQUESTS = status.HTTP_429_TOO_MANY_REQUESTS  # 请求过多
-
-    # 服务器错误状态码
-    INTERNAL_SERVER_ERROR = status.HTTP_500_INTERNAL_SERVER_ERROR  # 服务器内部错误
-    NOT_IMPLEMENTED = status.HTTP_501_NOT_IMPLEMENTED  # 服务器未实现请求功能
-    BAD_GATEWAY = status.HTTP_502_BAD_GATEWAY  # 网关错误
-    SERVICE_UNAVAILABLE = status.HTTP_503_SERVICE_UNAVAILABLE  # 服务不可用
-    GATEWAY_TIMEOUT = status.HTTP_504_GATEWAY_TIMEOUT  # 网关超时
-    HTTP_VERSION_NOT_SUPPORTED = status.HTTP_505_HTTP_VERSION_NOT_SUPPORTED  # 不支持的 HTTP 版本
+# 抛出系统错误
+raise SystemError(
+    error_code=ErrorCode.SYSTEM_ERROR,
+    message="系统内部错误",
+    data={'trace_id': 'abc123'}
+)
+"""

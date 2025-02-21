@@ -1,0 +1,7 @@
+#!/bin/bash
+
+set -o errexit
+set -o nounset
+
+rm -f './celerybeat.pid'
+watchmedo auto-restart -d . -p "*.py" -- celery -A config.celery_app beat -l INFO 

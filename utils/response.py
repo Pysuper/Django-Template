@@ -1,226 +1,261 @@
-import datetime
-import decimal
-import json
-from typing import Any, Dict
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+from uuid import UUID
 
+from django.db.models import Model
+from django.http import FileResponse, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.serializers import Serializer
 
 
-def do_response(request, code, msg):
+class ResponseCode(Enum):
+    """响应状态码枚举"""
+
+    SUCCESS = 200
+    CREATED = 201
+    ACCEPTED = 202
+    NO_CONTENT = 204
+    BAD_REQUEST = 400
+    UNAUTHORIZED = 401
+    FORBIDDEN = 403
+    NOT_FOUND = 404
+    METHOD_NOT_ALLOWED = 405
+    CONFLICT = 409
+    INTERNAL_ERROR = 500
+    SERVICE_UNAVAILABLE = 503
+
+
+class ApiResponse(Response):
     """
-    请求响应
-    :param request:
-    :param code:
-    :param msg:
-    :return:
-    """
-    request.data["code"] = code
-    request.data["msg"] = msg
-    return Response(data=request.data, status=status.HTTP_200_OK)
-
-
-def success_response(request, msg):
-    """
-    请求成功响应
-    :param request:
-    :param msg:
-    :return:
-    """
-    return do_response(request, 200, msg)
-
-
-def fail_response(request, msg):
-    """
-    请求错误响应
-    :param request:
-    :param msg:
-    :return:
-    """
-    return do_response(request, 400, msg)
-
-
-def fail_500_response(request, msg):
-    """
-    请求500响应
-    :param request:
-    :param msg:
-    :return:
-    """
-    request.data["msg"] = msg
-    request.data["code"] = 500
-    return Response(data=request.data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-def pysuper_response(response: Any) -> Dict[str, Any]:
-    """
-    格式化通知响应。
-
-    :param response: 原始响应
-    :return: 格式化后的响应数据
-    """
-    status_code = response.status_code
-    msg = "成功" if status_code < 400 else "失败"
-
-    return {
-        "code": status_code,
-        "message": msg,
-        "detail": response.data,
-    }
-
-
-class BaseResponse(object):
-    """
-    封装的返回信息类
-    """
-
-    def __init__(self):
-        self.code = 1000
-        self.data = None
-        self.error = None
-
-    @property
-    def dict(self):
-        return self.__dict__
-
-
-# 自定义响应类
-class XopsResponse(Response):
-    def __init__(self, data=None, message="success", code=status.HTTP_200_OK, **kwargs):
-        # 构造标准响应格式
-        response_data = {"code": code, "message": message, "data": data}
-        # 调用父类构造函数
-        super().__init__(data=response_data, status=code, **kwargs)
-
-
-class JsonResult(Response):
-    """
-    自定义响应类 CustomJsonResponse，继承自 DRF 的 Response 类。
-    该类用于统一 API 返回格式，包含 code（状态码）、message（消息）和 data（数据）。
+    统一API响应格式
+    支持更多数据类型和更灵活的响应格式
     """
 
     def __init__(
         self,
-        data=None,
-        code=None,
-        msg=None,
-        status=None,
-        headers=None,
-        paginator=None,
-        exception=False,
-        content_type=None,
-        template_name=None,
+        data: Any = None,
+        message: str = None,
+        code: int = ResponseCode.SUCCESS.value,
+        status_code: int = None,
+        headers: dict = None,
+        exception: bool = False,
+        **kwargs,
     ):
         """
-        初始化方法，构造自定义 JSON 响应。
-
-        :param data: 响应数据（通常是序列化后的数据）
-        :param code: 自定义状态码
-        :param msg: 自定义消息
-        :param status: HTTP 状态码
-        :param headers: HTTP 头部信息
-        :param exception: 是否是异常响应
-        :param content_type: 内容类型（通常为 application/json）
+        初始化API响应
+        :param data: 响应数据
+        :param message: 响应消息
+        :param code: 业务状态码
+        :param status_code: HTTP状态码
+        :param headers: 响应头
+        :param exception: 是否异常响应
+        :param kwargs: 其他参数
         """
-        # 调用父类 Response 的构造函数
-        super().__init__(None, status=status)
+        # 处理响应数据
+        response_data = self._process_response_data(data, message, code, **kwargs)
 
-        # 检查传入的 data 是否为 Serializer 实例
-        if isinstance(data, Serializer):
-            raise AssertionError("Use `.data` or `.errors` instead of Serializer instance.")
+        # 设置HTTP状态码
+        if status_code is None:
+            status_code = code if 100 <= code < 600 else status.HTTP_200_OK
 
-        # TODO: 自定义ViewSet响应结构体
-        self.template_name = template_name
+        super().__init__(data=response_data, status=status_code, headers=headers)
         self.exception = exception
-        self.content_type = content_type
-        # 处理分页信息
-        if paginator is not None:
-            data = {
-                "records": data,
-                "current": paginator.page.number,
-                "size": paginator.page.paginator.per_page,
-                "total": paginator.page.paginator.count,
-            }
-        else:
-            data = data
 
-        # 设置响应数据
-        self.data = {
-            "code": status,
-            "msg": msg if msg else "成功",
-            "data": data,
+    def _process_response_data(self, data: Any, message: str, code: int, **kwargs) -> dict:
+        """处理响应数据"""
+        # 基础响应结构
+        response = {
+            "code": code,
+            "message": message or self._get_default_message(code),
+            "data": self._serialize_data(data),
         }
-        # self.data = {
-        #     "code": code,
-        #     "msg": msg,
-        #     "data": {
-        #         "records": data,
-        #         "current": 1,
-        #         "size": 10,
-        #         "total": len(data),
-        #     },
-        # }
 
-        # 设置 HTTP 头部信息
-        if headers:
-            # 使用 update 方法添加头部信息
-            self.headers.update(headers)
+        # 处理分页数据
+        if "paginator" in kwargs and kwargs["paginator"] is not None:
+            paginator = kwargs["paginator"]
+            response["data"] = {
+                "list": response["data"],
+                "pagination": {
+                    "current": paginator.page.number,
+                    "size": paginator.page.paginator.per_page,
+                    "total": paginator.page.paginator.count,
+                    "pages": paginator.page.paginator.num_pages,
+                },
+            }
+
+        # 添加其他元数据
+        if "meta" in kwargs:
+            response["meta"] = kwargs["meta"]
+
+        return response
+
+    def _serialize_data(self, data: Any) -> Any:
+        """序列化数据"""
+        if data is None:
+            return None
+
+        if isinstance(data, (str, int, float, bool)):
+            return data
+
+        if isinstance(data, (datetime, date, time, Decimal, UUID)):
+            return str(data)
+
+        if isinstance(data, Enum):
+            return data.value
+
+        if isinstance(data, (list, tuple, set)):
+            return [self._serialize_data(item) for item in data]
+
+        if isinstance(data, dict):
+            return {key: self._serialize_data(value) for key, value in data.items()}
+
+        if isinstance(data, Model):
+            return self._serialize_model(data)
+
+        if isinstance(data, Serializer):
+            return data.data
+
+        return data
+
+    def _serialize_model(self, instance: Model) -> dict:
+        """序列化模型实例"""
+        if hasattr(instance, "to_dict"):
+            return instance.to_dict()
+
+        return {field.name: self._serialize_data(getattr(instance, field.name)) for field in instance._meta.fields}
+
+    def _get_default_message(self, code: int) -> str:
+        """获取默认消息"""
+        messages = {
+            ResponseCode.SUCCESS.value: "操作成功",
+            ResponseCode.CREATED.value: "创建成功",
+            ResponseCode.ACCEPTED.value: "请求已受理",
+            ResponseCode.NO_CONTENT.value: "无内容",
+            ResponseCode.BAD_REQUEST.value: "请求参数错误",
+            ResponseCode.UNAUTHORIZED.value: "未授权",
+            ResponseCode.FORBIDDEN.value: "禁止访问",
+            ResponseCode.NOT_FOUND.value: "资源不存在",
+            ResponseCode.METHOD_NOT_ALLOWED.value: "方法不允许",
+            ResponseCode.CONFLICT.value: "资源冲突",
+            ResponseCode.INTERNAL_ERROR.value: "服务器内部错误",
+            ResponseCode.SERVICE_UNAVAILABLE.value: "服务不可用",
+        }
+        return messages.get(code, "未知状态")
 
 
-class YgJSONRenderer(JSONRenderer):
+class ApiJsonRenderer(JSONRenderer):
     """
-    自行封装的渲染器
+    自定义JSON渲染器
+    支持更多数据类型的序列化
     """
 
-    def render(self, data, accepted_media_type=None, renderer_context=None):
+    def render(
+        self,
+        data: Any,
+        accepted_media_type: str = None,
+        renderer_context: dict = None,
+    ) -> bytes:
         """
-        如果使用这个render，
-        普通的response将会被包装成：
-            {"code":200,"data":"X","error":"X"}
-        这样的结果
-        使用方法：
-            - 全局
-                REST_FRAMEWORK = {
-                'DEFAULT_RENDERER_CLASSES': ('utils.yg_response.YgJSONRenderer', ),
+        渲染响应数据为JSON
+        :param data: 响应数据
+        :param accepted_media_type: 接受的媒体类型
+        :param renderer_context: 渲染上下文
+        :return: JSON字节串
+        """
+        if renderer_context is None:
+            renderer_context = {}
+
+        # 获取响应对象
+        response = renderer_context.get("response")
+
+        if response is not None:
+            if not isinstance(data, dict):
+                data = {"data": data}
+
+            # 如果状态码大于等于400，处理错误信息
+            if response.status_code >= 400:
+                data = {
+                    "code": response.status_code,
+                    "message": data.get("detail", "请求处理失败"),
+                    "errors": data if "detail" not in data else None,
                 }
-            - 局部
-                class UserCountView(APIView):
-                    renderer_classes = [YgJSONRenderer]
 
-        :param data: {"detail":"X"}
-        :param accepted_media_type:
-        :param renderer_context:
-        :return: {"code":200,"data":"X","error":"X"}
-        """
-        response_body = BaseResponse()
-        response_body.code = renderer_context.get("response").status_code
-
-        if response_body.code >= 400:
-            response_body.error = data.get("detail", {"detail": "没有具体的提示信息"})
-        else:
-            response_body.data = data
-
-        return super(YgJSONRenderer, self).render(response_body.dict, accepted_media_type, renderer_context)
+        return super().render(data, accepted_media_type, renderer_context)
 
 
-class DecimalEncoder(json.JSONEncoder):
+def success_response(
+    data: Any = None,
+    message: str = "操作成功",
+    code: int = ResponseCode.SUCCESS.value,
+    **kwargs,
+) -> ApiResponse:
     """
-    json序列化 Decimal 转string
+    成功响应
+    :param data: 响应数据
+    :param message: 响应消息
+    :param code: 状态码
+    :param kwargs: 其他参数
+    :return: ApiResponse
     """
+    return ApiResponse(data=data, message=message, code=code, **kwargs)
 
-    def default(self, o):
-        """
 
-        :param o:
-        :return:
-        """
-        if isinstance(o, decimal.Decimal):
-            return str(o)
-        elif isinstance(o, datetime.datetime):
-            return str(o)
-        elif isinstance(o, datetime.date):
-            return str(o)
+def error_response(
+    message: str = "操作失败",
+    code: int = ResponseCode.BAD_REQUEST.value,
+    data: Any = None,
+    **kwargs,
+) -> ApiResponse:
+    """
+    错误响应
+    :param message: 错误消息
+    :param code: 错误码
+    :param data: 错误数据
+    :param kwargs: 其他参数
+    :return: ApiResponse
+    """
+    return ApiResponse(data=data, message=message, code=code, **kwargs)
 
-        super(DecimalEncoder, self).default(o)
+
+def file_response(
+    file_path: str,
+    filename: str = None,
+    content_type: str = None,
+    as_attachment: bool = True,
+) -> FileResponse:
+    """
+    文件响应
+    :param file_path: 文件路径
+    :param filename: 文件名
+    :param content_type: 内容类型
+    :param as_attachment: 是否作为附件下载
+    :return: FileResponse
+    """
+    response = FileResponse(open(file_path, "rb"), content_type=content_type)
+    if filename and as_attachment:
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+def stream_response(
+    streaming_content: Any,
+    content_type: str = None,
+    filename: str = None,
+    as_attachment: bool = True,
+) -> StreamingHttpResponse:
+    """
+    流式响应
+    :param streaming_content: 流式内容
+    :param content_type: 内容类型
+    :param filename: 文件名
+    :param as_attachment: 是否作为附件下载
+    :return: StreamingHttpResponse
+    """
+    response = StreamingHttpResponse(streaming_content, content_type=content_type)
+    if filename and as_attachment:
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response

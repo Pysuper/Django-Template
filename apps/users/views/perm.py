@@ -1,7 +1,7 @@
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from utils.baseDRF import CoreViewSet
-from utils.custom import RbacPermission
+from utils.custom import RolePermission
 from utils.views import TreeAPIView
 from ..models import Perm
 from ..serializers.perm import PermListSerializer
@@ -15,7 +15,7 @@ class PermViewSet(CoreViewSet, TreeAPIView):
     search_fields = ("name", "menu_name")  # 支持按菜单名称搜索
     queryset = Perm.objects.all()
     serializer_class = PermListSerializer
-    permission_classes = (RbacPermission,)
+    permission_classes = (RolePermission,)
     authentication_classes = (JWTAuthentication,)
 
 

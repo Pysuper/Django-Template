@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  django: &django
+    build:
+      context: .
+      dockerfile: ./docker/local/django/Dockerfile
+    image: django_template_local_django
+    container_name: django_template_local_django
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - .:/app:z
+    env_file:
+      - ./.env
+    ports:
+      - "8000:8000"
+    command: /start
+    networks:
+      - django-network
+
+  postgres:
+    image: postgres:15
+    container_name: django_template_local_postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/local/postgres/init:/docker-entrypoint-initdb.d
+    env_file:
+      - ./.env
+    ports:
+      - "5432:5432"
+    networks:
+      - django-network
+
+  redis:
+    image: redis:7
+    container_name: django_template_local_redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - django-network
+
+  celery_worker:
+    <<: *django
+    image: django_template_local_celery_worker
+    container_name: django_template_local_celery_worker
+    depends_on:
+      - redis
+      - postgres
+    ports: []
+    command: /start-celeryworker
+    networks:
+      - django-network
+
+  celery_beat:
+    <<: *django
+    image: django_template_local_celery_beat
+    container_name: django_template_local_celery_beat
+    depends_on:
+      - redis
+      - postgres
+    ports: []
+    command: /start-celerybeat
+    networks:
+      - django-network
+
+  flower:
+    <<: *django
+    image: django_template_local_flower
+    container_name: django_template_local_flower
+    ports:
+      - "5555:5555"
+    command: /start-flower
+    networks:
+      - django-network
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: django_template_local_mailhog
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    networks:
+      - django-network
+
+networks:
+  django-network:
+    driver: bridge
+
+volumes:
+  postgres_data: {}
+  redis_data: {} 

@@ -1,4 +1,5 @@
 import datetime
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -15,11 +16,11 @@ env = environ.Env()
 
 READ_DOT_ENV_FILE = env.bool("DJANGO_READ_DOT_ENV_FILE", default=True)
 if READ_DOT_ENV_FILE:
-    env.read_env(str(ROOT_DIR / ".env/.env.local"))
+    env.read_env(str(ROOT_DIR / ".env"))
 
 # GENERAL
 # ------------------------------------------------------------------------------
-DEBUG = env.bool("DJANGO_DEBUG", False)
+DEBUG = env.bool("DJANGO_DEBUG", default=True)
 TIME_ZONE = "Asia/Shanghai"
 LANGUAGE_CODE = "en-us"
 SITE_ID = 1
@@ -28,13 +29,25 @@ USE_L10N = True
 USE_TZ = True
 LOCALE_PATHS = [str(ROOT_DIR / "locale")]
 
+# SECURITY
+# ------------------------------------------------------------------------------
+ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"] if DEBUG else ["*"])
+CORS_ALLOW_ALL_ORIGINS = env.bool("DJANGO_CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
+CORS_ALLOWED_ORIGINS = env.list("DJANGO_CORS_ALLOWED_ORIGINS", default=[])
+
+DJANGO_ALLOWED_HOSTS = ["*"]
+
 # DATABASES
 # ------------------------------------------------------------------------------
 DATABASES = {
     "default": {
-        **env.db("DATABASE_URL", default="YOUR_DATABASE_URL"),
         "ENGINE": "django.db.backends.mysql",
-        "CONN_MAX_AGE": 60 * 60 * 6,
+        "NAME": env.str("MYSQL_DATABASE", default="django_db"),
+        "USER": env.str("MYSQL_USER", default="root"),
+        "PASSWORD": env.str("MYSQL_PASSWORD", default="root"),
+        "HOST": env.str("MYSQL_HOST", default="localhost"),
+        "PORT": env.str("MYSQL_PORT", default="3306"),
+        "CONN_MAX_AGE": env.int("MYSQL_CONN_MAX_AGE", default=60 * 60 * 6),
         "ATOMIC_REQUESTS": True,
         "OPTIONS": {
             "init_command": 'SET sql_mode="STRICT_TRANS_TABLES"',
@@ -44,13 +57,13 @@ DATABASES = {
         },
         "POOL": {
             "name": "default",
-            "max_size": 20,  # 连接池最大连接数
-            "min_size": 1,  # 连接池最小连接数
-            "max_overflow": 10,  # 连接池溢出容量
-            "timeout": 30,  # 获取连接超时时间
-            "recycle": 3600,  # 连接回收时间(秒)
-            "echo": False,  # 是否打印SQL语句
-            "pre_ping": True,  # 每次获取连接前ping一下,确保连接可用
+            "max_size": env.int("MYSQL_POOL_MAX_SIZE", default=20),
+            "min_size": env.int("MYSQL_POOL_MIN_SIZE", default=5),
+            "max_overflow": env.int("MYSQL_POOL_MAX_OVERFLOW", default=10),
+            "timeout": env.int("MYSQL_POOL_TIMEOUT", default=30),
+            "recycle": env.int("MYSQL_POOL_RECYCLE", default=3600),
+            "echo": DEBUG,
+            "pre_ping": True,
         },
     }
 }
@@ -140,21 +153,15 @@ AUTH_PASSWORD_VALIDATORS = [
 # MIDDLEWARE
 # ------------------------------------------------------------------------------
 MIDDLEWARE = [
-    # "allauth.account.middleware.AccountMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
-    "utils.middleware.JWTAuthenticationMiddleware",  # 自定义JWT认证中间件
-    "utils.middleware.DisableCSRFCheck",  # 禁用 CSRF 验证
+    "apps.core.logging.RequestIdMiddleware",  # 添加请求ID中间件
     "django.middleware.security.SecurityMiddleware",
-    "django.middleware.gzip.GZipMiddleware",  # gzip 压缩"
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",  # CSRF 保护
+    "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.common.BrokenLinkEmailsMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    # "dauthz.middlewares.request_middleware.RequestMiddleware",  # django-authorization插件
+    "apps.core.logging.setup_request_logging",  # 请求日志中间件
 ]
 
 # DAUTHZ
@@ -256,7 +263,7 @@ LOGGING = {
         "standard": {
             "format": "[%(levelname)s][%(asctime)s][%(filename)s:%(lineno)d] %(message)s",
         },
-        # 简单格式,只包含日志级别和消息
+        # 简单格式,只含日志级别和消息
         "simple": {
             "format": "[%(levelname)s] %(message)s",
         },
@@ -264,7 +271,7 @@ LOGGING = {
         "collect": {
             "format": "%(message)s",
         },
-        # 安全日志格式
+        # 全日志格式
         "security": {
             "format": "[%(asctime)s][%(levelname)s][%(ip)s][%(user)s][%(message)s]",
         },
@@ -291,7 +298,7 @@ LOGGING = {
         },
         "file_handler": {
             "level": "INFO",
-            "class": "logging.handlers.TimedRotatingFileHandler",  # 修改为标准的TimedRotatingFileHandler
+            "class": "logging.handlers.TimedRotatingFileHandler",  # 修改为标准TimedRotatingFileHandler
             "filename": os.path.join(LOGS_DIR, "info.log"),
             "when": "midnight",
             "interval": 1,
@@ -359,7 +366,7 @@ LOGGING = {
             "formatter": "performance",
             "encoding": "utf-8",
         },
-        # 新增业务日志处理器
+        # 新业务日志处理器
         "business_handler": {
             "level": "DEBUG",
             "class": "logging.handlers.TimedRotatingFileHandler",
@@ -436,7 +443,7 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
-        # 新增业务日志记录器
+        # 新业务日志记录器
         "business": {
             "handlers": ["console", "business_handler"],
             "level": "INFO",
@@ -471,8 +478,8 @@ CELERY_TASK_SOFT_TIME_LIMIT = 60
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 # CORS
-ALLOWED_HOSTS = ["*"]
-CORS_ALLOW_ALL_ORIGINS = True
+# ------------------------------------------------------------------------------
+CORS_ALLOW_ALL_ORIGINS = env.bool("DJANGO_CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 
 # django-allauth
 # ------------------------------------------------------------------------------
@@ -530,7 +537,7 @@ REST_FRAMEWORK = {
         # 只允许已认证用户访问,要求用户必须登录,是最基本的认证要求
         # 全局默认需要登录认证,但是可以在具体的视图中通过permission_classes设置例外
         # 比如登录接口设置permission_classes = [AllowAny]
-        # 对于api/docs/这类接口, 我们可以在视图级别单独设置权限, 比如使用AllowAny或IsAdminUser
+        # 于api/docs/这类接口, 我们可以在视图级别单独设置权限, 比如使用AllowAny或IsAdminUser
         # 在全局默认使用IsAuthenticated, 确保API安全性
         # "rest_framework.permissions.IsAuthenticated",
     ],
@@ -544,7 +551,7 @@ REST_FRAMEWORK = {
         "anon": "100/day",
         "user": "1000/day",
     },
-    # 默认的版本控制类，使用了命名空间版本控制，允许你通过URL路径来区分不同版本的API
+    # 默认的版本控制类，使用了命名空间版本控制，允许你通过URL路径来区分不��版本的API
     "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.NamespaceVersioning",
     # 默认的过滤器后端，它允许你在查询参数中使用过滤条件，这个可以在类里面设置
     "DEFAULT_FILTER_BACKENDS": (
@@ -552,7 +559,7 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ),
-    # 默认的内容协商类。内容协商决定了客户端和服务器之间如何确定响应的格式
+    # 默认内容协商类。内容协商决定了客户端和服务器之间如何确定响应的格式
     "DEFAULT_CONTENT_NEGOTIATION_CLASS": "rest_framework.negotiation.DefaultContentNegotiation",
     # 默认的架构生成器类
     # DRF自带的自动架构生成器
@@ -583,7 +590,7 @@ SPECTACULAR_SETTINGS = {
 
 # PySuper
 # ------------------------------------------------------------------------------
-# 不再自动重定向到带斜杠的 URL 后缀，返回 404 状态码
+# 不再自动重定向带斜的 URL 后缀，返回 404 状态码
 APPEND_SLASH = False
 
 # 学校CODE的位数
@@ -611,7 +618,7 @@ def read_key(file_path):
 # RSA 密钥配置，解密用户密码
 RSA_PUBLIC_KEY = read_key(str(ROOT_DIR / "config/settings/pub.key"))
 RSA_PRIVATE_KEY = read_key(str(ROOT_DIR / "config/settings/pri.key"))
-RSA_PASSWORD = "your_ras_password"
+RSA_PASSWORD = env.str("DJANGO_RSA_PASSWORD", default="change_me_in_production")
 
 # 用户缓存默认闲置时间，单位：秒
 USER_CACHE_IDLE_TIME = 3600
@@ -627,7 +634,7 @@ login_code_config = (
 SINGLE_LOGIN = True  # 单点登录
 EXPIRATION_DELTA = timedelta(minutes=2)  # 验证码有效期（分钟）
 LOGIN_CODE_TYPE = "ARITHMETIC"  # 验证码格式: ARITHMETIC、CHINESE、RANDOM
-LOGIN_CODE_LENGTH = 4  # 验证码图片长度
+LOGIN_CODE_LENGTH = 4  # 验证码片长度
 LOGIN_CODE_WIDTH = 120  # 验证码图片宽度
 LOGIN_CODE_HEIGHT = 40  # 验证码图片高度
 LOGIN_CODE_FONT_NAME = str(ROOT_DIR / "SimSun.ttf")  # 验证码字体路径
@@ -641,14 +648,14 @@ JWT_AUTH = {
 }
 JWT_HEADER_NAME = "Authorization"  # 请求头头部名称
 JWT_AUTH_HEADER_PREFIX = "Bearer "  # Token前缀
-BASE64_SECRET_KEY = "Affect"  # Base64编码的密钥
+BASE64_SECRET_KEY = env.str("DJANGO_BASE64_SECRET_KEY", default="change_me_in_production")
 TOKEN_LIFETIME = 3600  # JWT 有效期（秒）
 ONLINE_KEY = "online-user:"  # 在线用户键前缀
 TOKEN_DETECT = 1800  # Token 过期检测时间（秒）
 TOKEN_RENEW_PERIOD = 3600  # Token 续期时间（秒）
 SIMPLE_JWT = {
-    # "BLACKLIST_AFTER_ROTATION": True,  # 刷新令牌时将旧令牌放入黑名单
-    "ACCESS_TOKEN_LIFETIME": datetime.timedelta(minutes=150),  # 访问令牌的有效期
+    # "BLACKLIST_AFTER_ROTATION": True,  # 刷新令牌时将旧令牌放黑名单
+    "ACCESS_TOKEN_LIFETIME": datetime.timedelta(minutes=150),  # 访��令牌的有效期
     "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=1),  # 刷新令牌的有效期
 }
 

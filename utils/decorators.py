@@ -1,246 +1,342 @@
 import hashlib
+import hashlib
+import time
 from functools import wraps
+from typing import Any, Callable
 
+from django.conf import settings
 from django.core.cache import cache
-from django.http import HttpResponseForbidden, HttpResponseRedirect
-from django.http import JsonResponse
+from django.db import transaction
+from django.http import HttpRequest, HttpResponseRedirect
 from django.urls import reverse
-from rest_framework import status
+from django.utils.translation import gettext as _
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.response import Response
 
-from error import ErrorCode, ParamError
-from utils.handler import custom_exception_handler
+from utils.error import BusinessError, ErrorCode
 from utils.log.logger import logger
-from utils.response import XopsResponse
-
-"""
-@login_required
-@admin_only
-@cache_page(60 * 15)  # 缓存 15 分钟
-@user_has_permission('app.view_model')
-def my_view(request):
-    # 视图逻辑
-    pass
-"""
+from utils.response import ApiResponse
 
 
-# 结果写入缓存=> 装饰器：decorators
-def cache_to_redis(timeout=60 * 15):
-    def decorator(func):
+def method_decorator(decorator: Callable) -> Callable:
+    """方法装饰器，用于类方法的装饰"""
+
+    def wrapper(view_func: Callable) -> Callable:
+        view_func.decorator = decorator
+        return view_func
+
+    return wrapper
+
+
+def cache_response(timeout: int = 300, key_prefix: str = "", cache_errors: bool = False) -> Callable:
+    """
+    缓存响应装饰器
+    :param timeout: 缓存超时时间（秒）
+    :param key_prefix: 缓存键前缀
+    :param cache_errors: 是否缓存错误响应
+    """
+
+    def decorator(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(*args, **kwargs):
-            # 生成一个唯一的缓存键
-            cache_key = f"{func.__name__}:{args}:{kwargs}"
-            print(f"---i cache key->>{cache_key}")
+        def wrapper(*args, **kwargs) -> Any:
+            # 生成缓存键
+            cache_key = f"{key_prefix}:{func.__name__}:{hashlib.md5(str(args).encode()).hexdigest()}"
 
-            # 尝试从缓存获取结果
-            if cache.get(cache_key) is not None:
-                print(f"---i from cache key->>{cache_key}")
-                return cache.get(cache_key)
+            # 尝试从缓存获取
+            cached_response = cache.get(cache_key)
+            if cached_response is not None:
+                return cached_response
 
-            # 执行函数并缓存结果
-            result = func(*args, **kwargs)
-            cache.set(cache_key, result, timeout)
+            # 执行函数
+            response = func(*args, **kwargs)
 
-            return result
+            # 判断是否需要缓存
+            if cache_errors or (isinstance(response, (Response, ApiResponse)) and response.status_code < 400):
+                cache.set(cache_key, response, timeout)
+
+            return response
 
         return wrapper
 
     return decorator
 
 
-# 请求频率限制=> 装饰器：decorators
-def request_frequency_limit(func):
+def rate_limit(key: str = "", rate: str = "60/m", block_time: int = 60) -> Callable:
     """
-    请求频率限制
-    :param func:
-    :return:
-    """
-
-    def wrapper(request, *args, **kwargs):
-
-        body = str(request.body.decode("utf-8"))
-        key = f"zfx_{hashlib.md5(body.encode('utf8')).hexdigest()}"
-        val = cache.get(key)
-        if val:
-            logger.info(f"已存在key={key}")
-            raise ParamError("请求太频繁，请稍后再请求", ErrorCode.PARAM_ERROR)
-        else:
-            # 给redis中加入了键为key，值为value缓存，过期时间60秒
-            cache.set(key, "1", 60)
-
-        try:
-            func_result = func(request, *args, **kwargs)
-            return func_result
-        finally:
-            # 删除redis中key的值
-            cache.delete(key)
-
-    return wrapper
-
-
-# 用户认证、权限检查装饰器
-def login_required(view_func):
-    """
-    检查用户是否登录，未登录则重定向到登录页面。
+    请求频率限制装饰器
+    :param key: 限制键（为空时使用IP）
+    :param rate: 频率限制（次数/时间单位：s秒，m分钟，h小时，d天）
+    :param block_time: 封禁时间（秒）
     """
 
-    @wraps(view_func)
-    def _wrapped_view(request, *args, **kwargs):
-        # 如果用户未登录，重定向到登录页
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(request: HttpRequest, *args, **kwargs) -> Any:
+            # 解析频率限制
+            count, period = rate.split("/")
+            count = int(count)
+
+            # 时间单位转换为秒
+            time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+            period_seconds = time_units.get(period[-1], 60) * int(period[:-1] or 1)
+
+            # 获取限制键
+            if not key:
+                client_ip = request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR"))
+                rate_key = f"rate_limit:{func.__name__}:{client_ip}"
+            else:
+                rate_key = f"rate_limit:{key}"
+
+            # 获取当前请求次数
+            current = cache.get(rate_key, 0)
+
+            # 检查是否被封禁
+            block_key = f"rate_limit_block:{rate_key}"
+            if cache.get(block_key):
+                raise BusinessError(error_code=ErrorCode.REQUEST_LIMIT, message=_("请求过于频繁，请稍后再试"))
+
+            # 检查是否超过限制
+            if current >= count:
+                # 设置封禁
+                cache.set(block_key, 1, block_time)
+                raise BusinessError(error_code=ErrorCode.REQUEST_LIMIT, message=_("请求过于频繁，请稍后再试"))
+
+            # 增加请求次数
+            cache.set(rate_key, current + 1, period_seconds)
+
+            return func(request, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def login_required(redirect_url: str = None) -> Callable:
+    """
+    登录验证装饰器
+    :param redirect_url: 重定向URL
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(request: HttpRequest, *args, **kwargs) -> Any:
+            if not request.user.is_authenticated:
+                if redirect_url:
+                    return HttpResponseRedirect(redirect_url)
+                return HttpResponseRedirect(reverse(settings.LOGIN_URL))
+            return func(request, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def permission_required(*permissions: str) -> Callable:
+    """
+    权限验证装饰器
+    :param permissions: 权限列表
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(request: HttpRequest, *args, **kwargs) -> Any:
+            if not request.user.is_authenticated:
+                raise PermissionDenied(_("请先登录"))
+
+            if not request.user.has_perms(permissions):
+                raise PermissionDenied(_("没有操作权限"))
+
+            return func(request, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def admin_required(func: Callable) -> Callable:
+    """管理员验证装饰器"""
+
+    @wraps(func)
+    def wrapper(request: HttpRequest, *args, **kwargs) -> Any:
         if not request.user.is_authenticated:
-            login_url = reverse("login")
-            return HttpResponseRedirect(login_url)
-        # 已登录则继续处理视图函数
-        return view_func(request, *args, **kwargs)
+            raise PermissionDenied(_("请先登录"))
 
-    return _wrapped_view
-
-
-# 用户权限检查装饰器
-def user_has_permission(permission):
-    """
-    检查用户是否具有指定的权限，无权限则返回403响应。
-    """
-
-    def decorator(view_func):
-        @wraps(view_func)
-        def _wrapped_view(request, *args, **kwargs):
-            # 如果用户没有指定权限，返回403禁止访问
-            if not request.user.has_perm(permission):
-                return HttpResponseForbidden("Forbidden: You don't have permission to access this page.")
-            return view_func(request, *args, **kwargs)
-
-        return _wrapped_view
-
-    return decorator
-
-
-# 记录用户访问装饰器
-def log_user_activity(view_func):
-    """
-    日志记录装饰器：记录用户的访问路径和用户名。
-    """
-
-    @wraps(view_func)
-    def _wrapped_view(request, *args, **kwargs):
-        # 记录用户访问信息
-        user = request.user.username if request.user.is_authenticated else "Anonymous"
-        print(f"User {user} accessed {request.path}")
-        return view_func(request, *args, **kwargs)
-
-    return _wrapped_view
-
-
-# 页面缓存装饰器
-def cache_page(timeout):
-    """
-    页面缓存装饰器：缓存视图返回的页面指定时间。
-    :param timeout: 缓存时间（秒）
-    """
-
-    def decorator(view_func):
-        @wraps(view_func)
-        def _wrapped_view(request, *args, **kwargs):
-            # 缓存的键为视图路径
-            cache_key = f"cache:{request.get_full_path()}"
-            response = cache.get(cache_key)
-            # 如果缓存存在，直接返回缓存内容
-            if response:
-                return response
-            # 缓存不存在，则调用视图函数，并设置缓存
-            response = view_func(request, *args, **kwargs)
-            cache.set(cache_key, response, timeout)
-            return response
-
-        return _wrapped_view
-
-    return decorator
-
-
-# 允许仅管理员访问的装饰器
-def admin_only(view_func):
-    """
-    限制仅管理员用户可访问视图，普通用户访问时返回403。
-    """
-
-    @wraps(view_func)
-    def _wrapped_view(request, *args, **kwargs):
-        # 检查用户是否为管理员
         if not request.user.is_staff:
-            return HttpResponseForbidden("Forbidden: Admins only.")
-        return view_func(request, *args, **kwargs)
+            raise PermissionDenied(_("需要管理员权限"))
 
-    return _wrapped_view
-
-
-# AJAX请求检查装饰器
-def ajax_required(view_func):
-    """
-    AJAX 请求检查装饰器：仅允许 AJAX 请求访问视图。
-    """
-
-    @wraps(view_func)
-    def _wrapped_view(request, *args, **kwargs):
-        # 检查请求是否为 AJAX 请求
-        if not request.is_ajax():
-            return HttpResponseForbidden("Forbidden: This view only accepts AJAX requests.")
-        return view_func(request, *args, **kwargs)
-
-    return _wrapped_view
-
-
-# 日志记录装饰器
-def log_request(func):
-    """
-    记录请求信息的装饰器。
-    """
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        print(f"Request to {func.__name__} with args: {args} and kwargs: {kwargs}")
-        return func(*args, **kwargs)
+        return func(request, *args, **kwargs)
 
     return wrapper
 
 
-# 性能监测装饰器
-def performance_monitor(func):
-    """
-    监测函数执行时间的装饰器。
-    返回JSON格式的响应，包含执行时间信息。
-    """
+def superuser_required(func: Callable) -> Callable:
+    """超级管理员验证装饰器"""
 
     @wraps(func)
-    def wrapper(*args, **kwargs):
-        import time
+    def wrapper(request: HttpRequest, *args, **kwargs) -> Any:
+        if not request.user.is_authenticated:
+            raise PermissionDenied(_("请先登录"))
 
-        start_time = time.time()
-        response = func(*args, **kwargs)
-        end_time = time.time()
-        execution_time = end_time - start_time
-        print(f"{func.__name__} executed in {execution_time:.4f} seconds")
-        return JsonResponse({"status": "success", "execution_time": execution_time})
+        if not request.user.is_superuser:
+            raise PermissionDenied(_("需要超级管理员权限"))
+
+        return func(request, *args, **kwargs)
 
     return wrapper
 
 
-# 全局响应拦截器装饰器
-def global_response_handler(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            # 获取原始响应
-            response = func(*args, **kwargs)
+def transaction_atomic(using: str = None, savepoint: bool = True) -> Callable:
+    """
+    事务装饰器
+    :param using: 数据库别名
+    :param savepoint: 是否使用保存点
+    """
 
-            # 如果已经是XopsResponse类型,直接返回
-            if isinstance(response, XopsResponse):
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            with transaction.atomic(using=using, savepoint=savepoint):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def log_action(action: str = "", level: str = "info") -> Callable:
+    """
+    操作日志装饰器
+    :param action: 操作描述
+    :param level: 日志级别
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(request: HttpRequest, *args, **kwargs) -> Any:
+            # 记录操作开始
+            start_time = time.time()
+
+            try:
+                response = func(request, *args, **kwargs)
+                # 记录操作成功
+                log_data = {
+                    "user": request.user.username if request.user.is_authenticated else "anonymous",
+                    "action": action or func.__name__,
+                    "path": request.path,
+                    "method": request.method,
+                    "ip": request.META.get("REMOTE_ADDR"),
+                    "duration": f"{(time.time() - start_time):.3f}s",
+                    "status": "success",
+                }
+                getattr(logger, level)(f"操作日志: {log_data}")
                 return response
 
-            # 统一响应格式
-            return XopsResponse(data=response, message="success", code=status.HTTP_200_OK)
+            except Exception as e:
+                # 记录操作失败
+                log_data = {
+                    "user": request.user.username if request.user.is_authenticated else "anonymous",
+                    "action": action or func.__name__,
+                    "path": request.path,
+                    "method": request.method,
+                    "ip": request.META.get("REMOTE_ADDR"),
+                    "duration": f"{(time.time() - start_time):.3f}s",
+                    "status": "error",
+                    "error": str(e),
+                }
+                logger.error(f"操作日志: {log_data}")
+                raise
 
-        except Exception as e:
-            # 异常交给异常处理器处理
-            return custom_exception_handler(e, context={"view": func})
+        return wrapper
 
-    return wrapper
+    return decorator
+
+
+def metric_collection(name: str = "") -> Callable:
+    """
+    指标收集装饰器
+    :param name: 指标名称
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            metric_name = name or func.__name__
+            start_time = time.time()
+
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+
+                # 记录成功指标
+                metric_key = f"metric:{metric_name}:success"
+                cache.incr(metric_key)
+
+                # 记录耗时
+                duration_key = f"metric:{metric_name}:duration"
+                durations = cache.get(duration_key) or []
+                durations.append(duration)
+                cache.set(duration_key, durations[-100:])  # 只保留最近100次
+
+                return result
+
+            except Exception as e:
+                # 记录失败指标
+                metric_key = f"metric:{metric_name}:error"
+                cache.incr(metric_key)
+                raise
+
+        return wrapper
+
+    return decorator
+
+
+def sensitive_params(*params: str) -> Callable:
+    """
+    敏感参数处理装饰器
+    :param params: 敏感参数名列表
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            # 处理kwargs中的敏感参数
+            for param in params:
+                if param in kwargs:
+                    kwargs[param] = "******"
+
+            # 处理args中的敏感参数（如果是字典）
+            new_args = []
+            for arg in args:
+                if isinstance(arg, dict):
+                    new_arg = arg.copy()
+                    for param in params:
+                        if param in new_arg:
+                            new_arg[param] = "******"
+                    new_args.append(new_arg)
+                else:
+                    new_args.append(arg)
+
+            return func(*new_args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def deprecated(reason: str = "") -> Callable:
+    """
+    废弃警告装饰器
+    :param reason: 废弃原因
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            import warnings
+
+            warnings.warn(f"{func.__name__} is deprecated. {reason}", DeprecationWarning, stacklevel=2)
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

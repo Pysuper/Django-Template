@@ -1,239 +1,283 @@
+import logging
+import traceback
 from datetime import datetime
+from typing import Any, Dict, Optional, Union
 
-from django.http.response import JsonResponse
+from django.conf import settings
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.http import Http404, HttpRequest, JsonResponse
+from django.utils.translation import gettext as _
 from rest_framework import status
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.views import exception_handler as drf_exception_handler
 
-from utils.log.logger import logger
+from utils.error import (
+    BaseError,
+    BusinessError,
+    DatabaseError,
+    ErrorCode,
+    ErrorLevel,
+    SystemError,
+    ValidationError as CustomValidationError,
+)
 
-
-class ApiError:
-    """API 错误类,用于统一处理API错误响应"""
-
-    DEFAULT_STATUS = 400
-
-    def __init__(self, status=DEFAULT_STATUS, message=None):
-        """初始化API错误对象"""
-        self.status = status
-        self.timestamp = int(datetime.now().timestamp() * 1000)
-        self.message = message or "未知错误"  # 提供默认错误信息
-
-    @classmethod
-    def error(cls, message):
-        """使用默认状态码创建错误对象"""
-        return cls(message=message)
-
-    @classmethod
-    def error_with_status(cls, status, message):
-        """使用自定义状态码创建错误对象"""
-        return cls(status=status, message=message)
-
-    def to_dict(self):
-        """将错误对象转换为字典格式"""
-        return {"status": self.status, "message": self.message, "timestamp": self.timestamp}
+logger = logging.getLogger(__name__)
 
 
-class BadCredentialsException(AuthenticationFailed):
-    """用户凭证无效异常"""
+class ExceptionData:
+    """异常数据类，用于格式化异常信息"""
 
-    def __init__(self, detail="用户名或密码不正确", code=None):
-        super().__init__(detail, code)
+    def __init__(
+        self,
+        exc: Exception,
+        status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR,
+        code: int = ErrorCode.SYSTEM_ERROR.code,
+        message: str = None,
+        level: ErrorLevel = ErrorLevel.ERROR,
+        data: Any = None,
+    ):
+        self.exc = exc
+        self.status_code = status_code
+        self.code = code
+        self.message = message or str(exc)
+        self.level = level
+        self.data = data
+        self.timestamp = datetime.now().isoformat()
 
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        error_dict = {
+            "code": self.code,
+            "message": self.message,
+            "level": self.level.value,
+            "timestamp": self.timestamp,
+        }
 
-class BadConfigurationException(RuntimeError):
-    """统一关于错误配置信息的异常类"""
+        if settings.DEBUG:
+            error_dict.update({"exception": self.exc.__class__.__name__, "traceback": traceback.format_exc()})
 
-    def __init__(self, message=None, *args):
-        """构造一个新的运行时异常，允许传入错误信息"""
-        super().__init__(message, *args)
+        if self.data is not None:
+            error_dict["data"] = self.data
 
-
-class BadRequestException(Exception):
-    """统一异常处理"""
-
-    def __init__(self, message: str, status_code: int = status.HTTP_400_BAD_REQUEST):
-        self.message = message  # 错误信息
-        self.status_code = status_code  # 状态码
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"{self.message} (状态码: {self.status_code})"  # 返回错误信息和状态码
-
-
-class EntityExistException(Exception):
-    """实体已存在异常"""
-
-    def __init__(self, entity: str, field: str, value: str):
-        """构造一个新的实体已存在异常，包含实体类、字段和对应值"""
-        self.message = self.generate_message(entity, field, value)  # 生成异常消息
-        super().__init__(self.message)
-
-    @staticmethod
-    def generate_message(entity: str, field: str, value: str) -> str:
-        """生成异常消息"""
-        return f"{entity} 的 {field} '{value}' 已存在"  # 返回实体已存在的消息
+        return error_dict
 
 
-class EntityNotFoundException(Exception):
-    """实体未找到异常"""
+class ExceptionHandler:
+    """统一异常处理器"""
 
-    def __init__(self, entity: str, field: str, value: str):
-        """构造一个新的实体未找到异常，包含实体类、字段和对应值"""
-        self.message = self.generate_message(entity, field, value)  # 生成异常消息
-        super().__init__(self.message)
+    def __init__(self):
+        # 异常映射表
+        self.exception_mappings = {
+            Http404: self._handle_404,
+            PermissionDenied: self._handle_permission_denied,
+            ValidationError: self._handle_validation_error,
+            AuthenticationFailed: self._handle_authentication_failed,
+            BaseError: self._handle_base_error,
+            Exception: self._handle_generic_exception,
+        }
 
-    @staticmethod
-    def generate_message(entity: str, field: str, value: str) -> str:
-        """生成异常消息"""
-        return f"{entity} 的 {field} '{value}' 不存在"  # 返回实体未找到的消息
+    def __call__(self, exc: Exception, context: dict) -> JsonResponse:
+        """处理异常"""
+        # 首先尝试使用DRF的异常处理
+        response = drf_exception_handler(exc, context)
+        if response is not None:
+            return response
 
+        # 获取请求对象
+        request = context.get("request")
 
-class ValidationErrorException(Exception):
-    """数据验证错误异常"""
+        # 记录异常日志
+        self._log_exception(request, exc)
 
-    def __init__(self, message: str):
-        """构造一个新的数据验证错误异常"""
-        self.message = message  # 错误信息
-        super().__init__(self.message)
+        # 查找对应的异常处理方法
+        handler = self._get_exception_handler(exc)
 
-    def __str__(self):
-        return f"验证错误: {self.message}"  # 返回验证错误信息
+        # 处理异常
+        exc_data = handler(exc, request)
 
+        # 返回JSON响应
+        return JsonResponse(data=exc_data.to_dict(), status=exc_data.status_code)
 
-class UnauthorizedAccessException(Exception):
-    """未授权访问异常"""
+    def _get_exception_handler(self, exc: Exception) -> callable:
+        """获取异常处理方法"""
+        for exc_class, handler in self.exception_mappings.items():
+            if isinstance(exc, exc_class):
+                return handler
+        return self._handle_generic_exception
 
-    def __init__(self, message: str = "未授权访问"):
-        self.message = message
-        super().__init__(self.message)
+    def _log_exception(self, request: Optional[HttpRequest], exc: Exception) -> None:
+        """记录异常日志"""
+        if not isinstance(exc, (Http404, PermissionDenied)):
+            logger.error(
+                f"Exception in {request.method if request else 'Unknown'} "
+                f"{request.path if request else 'Unknown'}: {str(exc)}",
+                exc_info=True,
+                extra={"status_code": getattr(exc, "status_code", 500), "request": request},
+            )
 
-    def __str__(self):
-        return f"未授权访问: {self.message}"
-
-
-class ResourceConflictException(Exception):
-    """资源冲突异常"""
-
-    def __init__(self, message: str):
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"资源冲突: {self.message}"
-
-
-class InternalServerErrorException(Exception):
-    """内部服务器错误异常"""
-
-    def __init__(self, message: str = "内部服务器错误"):
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"内部服务器错误: {self.message}"
-
-
-class TimeoutException(Exception):
-    """请求超时异常"""
-
-    def __init__(self, message: str = "请求超时"):
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"超时错误: {self.message}"
-
-
-class ForbiddenException(Exception):
-    """禁止访问异常"""
-
-    def __init__(self, message: str = "禁止访问"):
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"禁止访问: {self.message}"
-
-
-class NotImplementedException(Exception):
-    """未实现异常"""
-
-    def __init__(self, message: str = "功能未实现"):
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"未实现错误: {self.message}"
-
-
-# 全局异常处理类
-class GlobalExceptionHandler:
-    """全局异常处理类"""
-
-    def _create_json_response(self, api_error):
-        """创建统一的 JSON 响应"""
-        return JsonResponse(
-            {
-                "status": api_error.status,
-                "message": api_error.message,
-                "timestamp": api_error.timestamp,
-            },
-            status=api_error.status,
+    def _handle_404(self, exc: Http404, request: Optional[HttpRequest] = None) -> ExceptionData:
+        """处理404错误"""
+        return ExceptionData(
+            exc=exc,
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=ErrorCode.RESOURCE_NOT_FOUND.code,
+            message=_("Resource not found"),
+            level=ErrorLevel.WARNING,
         )
 
-    def _log_error(self, error, with_traceback=True):
-        """统一的错误日志记录"""
-        if with_traceback:
-            logger.error(str(error), exc_info=True)
+    def _handle_permission_denied(self, exc: PermissionDenied, request: Optional[HttpRequest] = None) -> ExceptionData:
+        """处理权限拒绝错误"""
+        return ExceptionData(
+            exc=exc,
+            status_code=status.HTTP_403_FORBIDDEN,
+            code=ErrorCode.PERMISSION_DENIED.code,
+            message=_("Permission denied"),
+            level=ErrorLevel.WARNING,
+        )
+
+    def _handle_validation_error(
+        self, exc: Union[ValidationError, CustomValidationError], request: Optional[HttpRequest] = None
+    ) -> ExceptionData:
+        """处理验证错误"""
+        if hasattr(exc, "message_dict"):
+            message = exc.message_dict
+        elif hasattr(exc, "message"):
+            message = exc.message
         else:
-            logger.error(str(error))
+            message = str(exc)
 
-    def handle_exception(self, request, e):
-        """处理所有未知异常"""
-        self._log_error(e)
-        return self._create_json_response(ApiError.error(str(e)))
+        return ExceptionData(
+            exc=exc,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=ErrorCode.PARAM_ERROR.code,
+            message=message,
+            level=ErrorLevel.WARNING,
+        )
 
-    def handle_bad_credentials(self, request, e):
-        """处理认证凭证异常"""
-        message = "用户名或密码不正确" if str(e) == "坏的凭证" else str(e)
-        self._log_error(message, with_traceback=False)
-        return self._create_json_response(ApiError.error(message))
+    def _handle_authentication_failed(
+        self, exc: AuthenticationFailed, request: Optional[HttpRequest] = None
+    ) -> ExceptionData:
+        """处理认证失败错误"""
+        return ExceptionData(
+            exc=exc,
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            code=ErrorCode.UNAUTHORIZED.code,
+            message=str(exc),
+            level=ErrorLevel.WARNING,
+        )
 
-    def handle_bad_request(self, request, e):
-        """处理请求错误异常"""
-        self._log_error(e)
-        return self._create_json_response(ApiError.error_with_status(400, str(e)))
+    def _handle_base_error(self, exc: BaseError, request: Optional[HttpRequest] = None) -> ExceptionData:
+        """处理基础错误"""
+        return ExceptionData(
+            exc=exc,
+            status_code=exc.status_code,
+            code=exc.error_code.code,
+            message=exc.message,
+            level=exc.level,
+            data=exc.data,
+        )
 
-    def handle_entity_exist(self, request, e):
-        """处理实体已存在异常"""
-        self._log_error(e)
-        return self._create_json_response(ApiError.error(str(e)))
-
-    def handle_entity_not_found(self, request, e):
-        """处理实体未找到异常"""
-        self._log_error(e)
-        return self._create_json_response(ApiError.error_with_status(404, str(e)))
-
-    def handle_validation_error(self, request, e):
-        """处理参数验证异常"""
-        self._log_error(e)
-        message = e.detail[0].get("message") if e.detail else "参数验证失败"
-        return self._create_json_response(ApiError.error(message))
+    def _handle_generic_exception(self, exc: Exception, request: Optional[HttpRequest] = None) -> ExceptionData:
+        """处理通用异常"""
+        return ExceptionData(
+            exc=exc,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code=ErrorCode.SYSTEM_ERROR.code,
+            message=_("Internal server error"),
+            level=ErrorLevel.ERROR,
+        )
 
 
-handler = GlobalExceptionHandler()
+# 创建全局异常处理器实例
+exception_handler = ExceptionHandler()
 
-# 自定义异常处理映射
-exception_handlers = {
-    BadCredentialsException: handler.handle_bad_credentials,
-    BadRequestException: handler.handle_bad_request,
-    EntityExistException: handler.handle_entity_exist,
-    EntityNotFoundException: handler.handle_entity_not_found,
-    ValidationErrorException: handler.handle_validation_error,
-    UnauthorizedAccessException: handler.handle_exception,
-    ResourceConflictException: handler.handle_exception,
-    InternalServerErrorException: handler.handle_exception,
-    TimeoutException: handler.handle_exception,
-    ForbiddenException: handler.handle_exception,
-    NotImplementedException: handler.handle_exception,
-}
+
+def custom_exception_handler(exc: Exception, context: dict) -> JsonResponse:
+    """
+    自定义异常处理函数
+    :param exc: 异常对象
+    :param context: 上下文信息
+    :return: JsonResponse
+    """
+    return exception_handler(exc, context)
+
+
+# 异常装饰器
+def handle_exceptions(error_code: ErrorCode = None, error_message: str = None):
+    """
+    异常处理装饰器
+    :param error_code: 错误码
+    :param error_message: 错误消息
+    """
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
+                if isinstance(e, BaseError):
+                    raise e
+                raise SystemError(
+                    error_code=error_code or ErrorCode.SYSTEM_ERROR,
+                    message=error_message or str(e),
+                    data={"function": func.__name__},
+                )
+
+        return wrapper
+
+    return decorator
+
+
+# 业务异常处理装饰器
+def handle_business_exceptions(error_code: ErrorCode = None, error_message: str = None):
+    """
+    业务异常处理装饰器
+    :param error_code: 错误码
+    :param error_message: 错误消息
+    """
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                logger.warning(f"Business error in {func.__name__}: {str(e)}")
+                if isinstance(e, BaseError):
+                    raise e
+                raise BusinessError(
+                    error_code=error_code or ErrorCode.OPERATION_FAILED,
+                    message=error_message or str(e),
+                    data={"function": func.__name__},
+                )
+
+        return wrapper
+
+    return decorator
+
+
+# 数据库异常处理装饰器
+def handle_db_exceptions(error_code: ErrorCode = None, error_message: str = None):
+    """
+    数据库异常处理装饰器
+    :param error_code: 错误码
+    :param error_message: 错误消息
+    """
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Database error in {func.__name__}: {str(e)}", exc_info=True)
+                if isinstance(e, BaseError):
+                    raise e
+                raise DatabaseError(
+                    error_code=error_code or ErrorCode.DB_ERROR,
+                    message=error_message or str(e),
+                    data={"function": func.__name__},
+                )
+
+        return wrapper
+
+    return decorator

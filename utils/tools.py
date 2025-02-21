@@ -1,85 +1,85 @@
 import base64
+import os
 import random
+import re
+import string
+import uuid
+from datetime import datetime, timedelta
 from enum import Enum
 from io import BytesIO
-from typing import List
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from PIL import Image, ImageDraw, ImageFont
-from captcha.image import ImageCaptcha
+import qrcode
+from PIL import Image
+from cryptography.exceptions import InvalidKey
+from cryptography.fernet import Fernet
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.core.mail import EmailMessage
+from django.template.loader import render_to_string
+from django.utils import timezone
+from django.utils.translation import gettext as _
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import RefreshToken
 
 # 导入配置参数
-from config.settings.base import (
-    JWT_AUTH_HEADER_PREFIX,
-    LOGIN_CODE_FONT_NAME,
-    LOGIN_CODE_FONT_SIZE,
-    LOGIN_CODE_HEIGHT,
-    LOGIN_CODE_LENGTH,
-    LOGIN_CODE_TYPE,
-    LOGIN_CODE_WIDTH,
-)
+from config.settings.base import JWT_AUTH_HEADER_PREFIX
 
 
 class CodeBiEnum(Enum):
     """验证码业务场景枚举"""
 
-    ONE = (1, "旧邮箱修改邮箱")  # 旧邮箱修改邮箱
-    TWO = (2, "通过邮箱修改密码")  # 通过邮箱修改密码
+    EMAIL_CHANGE = (1, "旧邮箱修改邮箱")
+    PASSWORD_RESET = (2, "通过邮箱修改密码")
+    PHONE_CHANGE = (3, "修改手机号码")
+    ACCOUNT_VERIFY = (4, "账号验证")
+    TWO_FACTOR_AUTH = (5, "两步验证")
 
     def __init__(self, code: int, description: str):
         self._value_ = code
         self.description = description
 
     @classmethod
-    def find(cls, code: int):
+    def find(cls, code: int) -> Optional["CodeBiEnum"]:
         """根据代码查找对应的枚举"""
         return next((value for value in cls if value.value == code), None)
-
-
-class CodeEnum(Enum):
-    """验证码业务场景对应的Redis键名枚举"""
-
-    PHONE_RESET_EMAIL_CODE = ("phone_reset_email_code_", "通过手机号码重置邮箱")
-    EMAIL_RESET_EMAIL_CODE = ("email_reset_email_code_", "通过旧邮箱重置邮箱")
-    PHONE_RESET_PWD_CODE = ("phone_reset_pwd_code_", "通过手机号码重置密码")
-    EMAIL_RESET_PWD_CODE = ("email_reset_pwd_code_", "通过邮箱重置密码")
-
-    def __init__(self, key: str, description: str):
-        self._value_ = key
-        self.description = description
 
 
 class DataScopeEnum(Enum):
     """数据权限范围枚举"""
 
-    ALL = ("全部", "全部的数据权限")  # 全部数据权限
-    THIS_LEVEL = ("本级", "自己部门的数据权限")  # 本部门数据权限
-    CUSTOMIZE = ("自定义", "自定义的数据权限")  # 自定义数据权限
+    ALL = ("ALL", "全部数据权限")
+    DEPT = ("DEPT", "本部门数据权限")
+    DEPT_AND_CHILD = ("DEPT_AND_CHILD", "本部门及以下数据权限")
+    CUSTOMIZE = ("CUSTOMIZE", "自定义数据权限")
+    SELF = ("SELF", "仅本人数据权限")
 
-    def __init__(self, value, description):
-        self._value_ = value
+    def __init__(self, code: str, description: str):
+        self._value_ = code
         self.description = description
 
     @classmethod
-    def find(cls, val):
-        """根据值查找对应的枚举"""
-        return next((scope for scope in cls if scope.value == val), None)
+    def find(cls, code: str) -> Optional["DataScopeEnum"]:
+        """根据代码查找对应的枚举"""
+        return next((scope for scope in cls if scope.value == code), None)
 
 
 class SecurityUtils:
-    """安全工具类 - 用于获取当前登录用户信息"""
+    """安全工具类"""
 
     @staticmethod
-    def get_current_user(request):
+    def get_current_user(request) -> Any:
         """获取当前登录用户"""
+        # 增加对request是否有user属性的检查
+        if not hasattr(request, 'user'):
+            raise AuthenticationFailed(_("请求对象没有user属性"))
         user = request.user
         if user.is_authenticated:
             return user
-        raise AuthenticationFailed("当前登录状态已过期")
+        raise AuthenticationFailed(_("当前登录状态已过期"))
 
     @staticmethod
     def get_current_username(request) -> str:
@@ -92,226 +92,241 @@ class SecurityUtils:
         return SecurityUtils.get_current_user(request).id
 
     @staticmethod
-    def get_current_user_data_scope(request) -> List[int]:
+    def get_current_user_data_scope(request) -> List[str]:
         """获取当前用户数据权限范围"""
         return SecurityUtils.get_current_user(request).data_scopes
 
     @staticmethod
-    def get_data_scope_type(request) -> str:
-        """获取数据权限级别"""
-        data_scopes = SecurityUtils.get_current_user_data_scope(request)
-        return "" if data_scopes else DataScopeEnum.ALL.value
-
-
-class RsaUtils:
-    """RSA加解密工具类"""
-
-    @staticmethod
-    def generate_key_pair():
-        """生成RSA公私钥对"""
-        # 生成私钥
-        private_key = rsa.generate_private_key(public_exponent=65537, key_size=1024, backend=default_backend())
-        # 获取公钥
-        public_key = private_key.public_key()
-
-        # 转换为PEM格式
-        private_key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-        )
-        public_key_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-
-        return public_key_pem, private_key_pem
-
-    @staticmethod
-    def encrypt_by_public_key(public_key_pem, plaintext):
-        """使用公钥加密"""
-        # 加载公钥
-        public_key = serialization.load_pem_public_key(public_key_pem, backend=default_backend())
-        # 加密数据
-        ciphertext = public_key.encrypt(
-            plaintext.encode("utf-8"),
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
-        return base64.b64encode(ciphertext).decode("utf-8")
-
-    @staticmethod
-    def decrypt_by_private_key(private_key_pem, rsa_password, ciphertext):
-        """
-        使用私钥解密
-        :param private_key_pem: PEM格式私钥
-        :param rsa_password: 私钥密码(如果有)
-        :param ciphertext: Base64编码的密文
-        :return: 解密后的明文
-        """
-        # 加载私钥
-        private_key = serialization.load_pem_private_key(
-            private_key_pem.encode(),
-            password=rsa_password.encode() if rsa_password else None,
-            backend=default_backend(),
-        )
-
-        # Base64解码密文
-        ciphertext_bytes = base64.b64decode(ciphertext)
-
-        # 使用PKCS1v1.5填充方式解密
-        plaintext = private_key.decrypt(ciphertext_bytes, padding.PKCS1v15())
-        # 使用OAEP解密
-        # plaintext = private_key.decrypt(
-        #     ciphertext_bytes,
-        #     padding.OAEP(
-        #         mgf=padding.MGF1(algorithm=hashes.SHA256()),
-        #         algorithm=hashes.SHA256(),
-        #         label=None
-        #     )
-        # )
-
-        return plaintext.decode("utf-8")
-
-
-class CaptchaUtils:
-    """验证码生成工具类"""
-
-    @staticmethod
-    def generate_captcha():
-        """根据配置生成验证码"""
-        code_type = LOGIN_CODE_TYPE
-        params = {
-            "width": LOGIN_CODE_WIDTH,
-            "height": LOGIN_CODE_HEIGHT,
-            "length": LOGIN_CODE_LENGTH,
-            "font_size": LOGIN_CODE_FONT_SIZE,
-            "font_name": LOGIN_CODE_FONT_NAME,
-        }
-
-        # 验证码生成器映射
-        captcha_generators = {
-            "ARITHMETIC": CaptchaUtils._generate_arithmetic_captcha,  # 算术验证码
-            "CHINESE": CaptchaUtils._generate_chinese_captcha,  # 中文验证码
-            "RANDOM": CaptchaUtils._generate_random_captcha,  # 随机字符验证码
-        }
-
-        generator = captcha_generators.get(code_type)
-        if generator:
-            return generator(**params)
-        raise ValueError(f"不支持的验证码类型: {code_type}")
-
-    @staticmethod
-    def _generate_arithmetic_captcha(width, height, length, font_size, font_name):
-        """生成算术验证码"""
-        # 生成随机算术表达式
-        n1 = random.randint(1, 10)
-        n2 = random.randint(1, 10)
-        operation = random.choice(["+", "-", "*"])
-
-        # 计算结果
-        result = {"+": n1 + n2, "-": n1 - n2, "*": n1 * n2}[operation]
-
-        captcha_value = str(result)
-        arithmetic_string = f"{n1} {operation} {n2} = ?"
-
-        # 创建图像
-        image = Image.new("RGB", (width, height), (255, 255, 255))
-        draw = ImageDraw.Draw(image)
-
-        # 加载字体
-        font = ImageFont.truetype(font_name, font_size) if font_name else ImageFont.load_default()
-
-        # 绘制文本
-        text_width, text_height = draw.textsize(arithmetic_string, font=font)
-        draw.text(
-            ((width - text_width) // 2, (height - text_height) // 2),
-            arithmetic_string,
-            font=font,
-            fill=(0, 0, 0),
-        )
-
-        # 添加干扰点
-        for _ in range(50):
-            x = random.randint(0, width)
-            y = random.randint(0, height)
-            draw.point((x, y), fill=random.choice([(255, 0, 0), (0, 255, 0), (0, 0, 255)]))
-
-        # 转换为Base64
-        buffered = BytesIO()
-        image.save(buffered, format="PNG", dpi=(300, 300))
-        captcha_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-        return captcha_value, f"data:image/png;base64,{captcha_image}"
-
-    @staticmethod
-    def _generate_chinese_captcha(width, height, length, font_size, font_name):
-        """生成中文验证码"""
-        chinese_chars = "汉字验证码生成测试"
-        captcha_value = "".join(random.choices(chinese_chars, k=length))
-
-        # 创建图像
-        image = Image.new("RGB", (width, height), (255, 255, 255))
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype(font_name, font_size) if font_name else ImageFont.load_default()
-
-        # 绘制文本
-        text_width, text_height = draw.textsize(captcha_value, font=font)
-        draw.text(((width - text_width) // 2, (height - text_height) // 2), captcha_value, font=font, fill=(0, 0, 0))
-
-        # 转换为Base64
-        buffered = BytesIO()
-        image.save(buffered, format="PNG", dpi=(300, 300))
-        captcha_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-        return captcha_value, f"data:image/png;base64,{captcha_image}"
-
-    @staticmethod
-    def _generate_random_captcha(width, height, length, font_size, font_name):
-        """生成随机字符验证码"""
-        # 创建验证码生成器
-        captcha = ImageCaptcha(
-            width=width, height=height, fonts=[font_name] if font_name else None, font_sizes=[font_size]
-        )
-
-        # 生成随机数字验证码
-        captcha_value = "".join(random.choices("0123456789", k=length))
-
-        # 生成图像
-        data = captcha.generate(captcha_value)
-        image = BytesIO(data.read())
-
-        # 转换为Base64
-        captcha_image = base64.b64encode(image.getvalue()).decode("utf-8")
-
-        return captcha_value, f"data:image/png;base64,{captcha_image}"
-
-
-class TokenProvider:
-    """JWT令牌管理工具类"""
-
-    @staticmethod
-    def create_token(user):
-        """创建用户访问令牌"""
+    def get_token(user) -> Dict[str, str]:
+        """获取用户Token"""
         refresh = RefreshToken.for_user(user)
-        return str(refresh.access_token)
+        return {
+            "access_token": str(refresh.access_token),
+            "refresh_token": str(refresh),
+            "token_type": JWT_AUTH_HEADER_PREFIX,
+        }
 
     @staticmethod
-    def get_user_from_token(token):
-        """从令牌中获取用户信息"""
-        from rest_framework_simplejwt.authentication import JWTAuthentication
-
-        jwt_auth = JWTAuthentication()
-        validated_token = jwt_auth.get_validated_token(token)
-        return jwt_auth.get_user(validated_token)
+    def hash_password(password: str) -> str:
+        """密码哈希"""
+        salt = os.urandom(32)
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000, backend=default_backend())
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        return f"{base64.urlsafe_b64encode(salt).decode()}${key.decode()}"
 
     @staticmethod
-    def get_token_from_request(request):
-        """从请求头中获取令牌"""
-        auth = request.headers.get("Authorization", "").split()
-        jwt_prefix = JWT_AUTH_HEADER_PREFIX.replace(" ", "").lower()
-        if len(auth) == 2 and auth[0].lower() == jwt_prefix:
-            return auth[1]
-        return None
+    def verify_password(password: str, hashed: str) -> bool:
+        """验证密码"""
+        try:
+            salt, key = hashed.split("$")
+            salt = base64.urlsafe_b64decode(salt.encode())
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000, backend=default_backend()
+            )
+            kdf.verify(password.encode(), base64.urlsafe_b64decode(key.encode()))
+            return True
+        # 避免使用裸的except语句，应捕获具体的异常
+        except (ValueError, base64.binascii.Error, InvalidKey):
+            return False
+
+
+class CryptoUtils:
+    """加密工具类"""
+
+    @staticmethod
+    def generate_key() -> bytes:
+        """生成Fernet密钥"""
+        return Fernet.generate_key()
+
+    @staticmethod
+    def encrypt(data: Union[str, bytes], key: bytes) -> str:
+        """加密数据"""
+        f = Fernet(key)
+        if isinstance(data, str):
+            data = data.encode()
+        return f.encrypt(data).decode()
+
+    @staticmethod
+    def decrypt(token: Union[str, bytes], key: bytes) -> str:
+        """解密数据"""
+        f = Fernet(key)
+        if isinstance(token, str):
+            token = token.encode()
+        return f.decrypt(token).decode()
+
+    @staticmethod
+    def generate_random_string(length: int = 32) -> str:
+        """生成随机字符串"""
+        return "".join(random.choices(string.ascii_letters + string.digits, k=length))
+
+
+class FileUtils:
+    """文件工具类"""
+
+    @staticmethod
+    def save_file(file, directory: str = "uploads") -> str:
+        """保存文件"""
+        ext = os.path.splitext(file.name)[1]
+        filename = f"{uuid.uuid4().hex}{ext}"
+        path = os.path.join(directory, filename)
+        return default_storage.save(path, file)
+
+    @staticmethod
+    def get_file_url(path: str) -> str:
+        """获取文件URL"""
+        return default_storage.url(path)
+
+    @staticmethod
+    def delete_file(path: str) -> bool:
+        """删除文件"""
+        try:
+            default_storage.delete(path)
+            return True
+        # 避免使用裸的except语句，应捕获具体的异常
+        except FileNotFoundError:
+            return False
+
+    @staticmethod
+    def get_file_size(path: str) -> int:
+        """获取文件大小"""
+        return default_storage.size(path)
+
+    @staticmethod
+    def get_file_content_type(filename: str) -> str:
+        """获取文件Content-Type"""
+        import mimetypes
+
+        return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+class ImageUtils:
+    """图片工具类"""
+
+    @staticmethod
+    def generate_thumbnail(image, size: Tuple[int, int]) -> Image:
+        """生成缩略图"""
+        if isinstance(image, str):
+            # 增加对文件是否存在的检查，避免Image.open方法可能抛出的异常
+            if not os.path.exists(image):
+                raise FileNotFoundError(f"文件 {image} 不存在")
+            image = Image.open(image)
+        image.thumbnail(size)
+        return image
+
+    @staticmethod
+    def convert_to_webp(image, quality: int = 80) -> bytes:
+        """转换为WebP格式"""
+        if isinstance(image, str):
+            # 增加对文件是否存在的检查，避免Image.open方法可能抛出的异常
+            if not os.path.exists(image):
+                raise FileNotFoundError(f"文件 {image} 不存在")
+            image = Image.open(image)
+        buffer = BytesIO()
+        image.save(buffer, format="WebP", quality=quality)
+        return buffer.getvalue()
+
+    @staticmethod
+    def generate_qrcode(data: str, size: int = 200) -> Image:
+        """生成二维码"""
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        return qr.make_image(fill_color="black", back_color="white").resize((size, size))
+
+
+class EmailUtils:
+    """邮件工具类"""
+
+    @staticmethod
+    def send_email(
+        subject: str,
+        to_email: Union[str, List[str]],
+        template_name: str,
+        context: Dict[str, Any],
+        from_email: Optional[str] = None,
+    ) -> bool:
+        """发送邮件"""
+        try:
+            html_content = render_to_string(template_name, context)
+            email = EmailMessage(
+                subject=subject,
+                body=html_content,
+                from_email=from_email or settings.DEFAULT_FROM_EMAIL,
+                to=[to_email] if isinstance(to_email, str) else to_email,
+            )
+            email.content_subtype = "html"
+            email.send()
+            return True
+        except Exception as e:
+            print(f"发送邮件失败: {str(e)}")
+            return False
+
+
+class ValidationUtils:
+    """验证工具类"""
+    EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+    PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
+    USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{4,16}$")
+
+    @staticmethod
+    def is_valid_email(email: str) -> bool:
+        """验证邮箱格式"""
+        return bool(ValidationUtils.EMAIL_PATTERN.match(email))
+
+    @staticmethod
+    def is_valid_phone(phone: str) -> bool:
+        """验证手机号格式（中国大陆）"""
+        return bool(ValidationUtils.PHONE_PATTERN.match(phone))
+
+    @staticmethod
+    def is_valid_username(username: str) -> bool:
+        """验证用户名格式"""
+        return bool(ValidationUtils.USERNAME_PATTERN.match(username))
+
+    @staticmethod
+    def is_valid_password(password: str) -> bool:
+        """验证密码强度"""
+        if len(password) < 8:
+            return False
+        if not re.search(r"[A-Z]", password):
+            return False
+        if not re.search(r"[a-z]", password):
+            return False
+        if not re.search(r"\d", password):
+            return False
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+            return False
+        return True
+
+
+class DateTimeUtils:
+    """日期时间工具类"""
+
+    @staticmethod
+    def format_datetime(dt: Optional[datetime] = None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+        """格式化日期时间"""
+        if dt is None:
+            dt = timezone.now()
+        return dt.strftime(fmt)
+
+    @staticmethod
+    def parse_datetime(dt_str: str, fmt: str = "%Y-%m-%d %H:%M:%S") -> datetime:
+        """解析日期时间字符串"""
+        return datetime.strptime(dt_str, fmt)
+
+    @staticmethod
+    def get_date_range(days: int) -> Tuple[datetime, datetime]:
+        """获取日期范围"""
+        end = timezone.now()
+        start = end - timedelta(days=days)
+        return start, end
+
+    @staticmethod
+    def is_expired(dt: datetime, minutes: int = 30) -> bool:
+        """检查是否过期"""
+        return timezone.now() > dt + timedelta(minutes=minutes)
