@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import qrcode
 from PIL import Image
+from cryptography.exceptions import InvalidKey
 from cryptography.fernet import Fernet
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
@@ -72,6 +73,9 @@ class SecurityUtils:
     @staticmethod
     def get_current_user(request) -> Any:
         """获取当前登录用户"""
+        # 增加对request是否有user属性的检查
+        if not hasattr(request, 'user'):
+            raise AuthenticationFailed(_("请求对象没有user属性"))
         user = request.user
         if user.is_authenticated:
             return user
@@ -121,7 +125,8 @@ class SecurityUtils:
             )
             kdf.verify(password.encode(), base64.urlsafe_b64decode(key.encode()))
             return True
-        except:
+        # 避免使用裸的except语句，应捕获具体的异常
+        except (ValueError, base64.binascii.Error, InvalidKey):
             return False
 
 
@@ -177,7 +182,8 @@ class FileUtils:
         try:
             default_storage.delete(path)
             return True
-        except:
+        # 避免使用裸的except语句，应捕获具体的异常
+        except FileNotFoundError:
             return False
 
     @staticmethod
@@ -200,6 +206,9 @@ class ImageUtils:
     def generate_thumbnail(image, size: Tuple[int, int]) -> Image:
         """生成缩略图"""
         if isinstance(image, str):
+            # 增加对文件是否存在的检查，避免Image.open方法可能抛出的异常
+            if not os.path.exists(image):
+                raise FileNotFoundError(f"文件 {image} 不存在")
             image = Image.open(image)
         image.thumbnail(size)
         return image
@@ -208,6 +217,9 @@ class ImageUtils:
     def convert_to_webp(image, quality: int = 80) -> bytes:
         """转换为WebP格式"""
         if isinstance(image, str):
+            # 增加对文件是否存在的检查，避免Image.open方法可能抛出的异常
+            if not os.path.exists(image):
+                raise FileNotFoundError(f"文件 {image} 不存在")
             image = Image.open(image)
         buffer = BytesIO()
         image.save(buffer, format="WebP", quality=quality)
@@ -257,24 +269,24 @@ class EmailUtils:
 
 class ValidationUtils:
     """验证工具类"""
+    EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+    PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
+    USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{4,16}$")
 
     @staticmethod
     def is_valid_email(email: str) -> bool:
         """验证邮箱格式"""
-        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        return bool(re.match(pattern, email))
+        return bool(ValidationUtils.EMAIL_PATTERN.match(email))
 
     @staticmethod
     def is_valid_phone(phone: str) -> bool:
         """验证手机号格式（中国大陆）"""
-        pattern = r"^1[3-9]\d{9}$"
-        return bool(re.match(pattern, phone))
+        return bool(ValidationUtils.PHONE_PATTERN.match(phone))
 
     @staticmethod
     def is_valid_username(username: str) -> bool:
         """验证用户名格式"""
-        pattern = r"^[a-zA-Z0-9_-]{4,16}$"
-        return bool(re.match(pattern, username))
+        return bool(ValidationUtils.USERNAME_PATTERN.match(username))
 
     @staticmethod
     def is_valid_password(password: str) -> bool:

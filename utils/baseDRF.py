@@ -15,7 +15,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from utils.custom import LargePagination
 from utils.log.logger import logger
 from utils.other.excel import pandas_download_excel
-from utils.response import JsonResult
+from utils.response import ApiResponse as JsonResult
 
 
 # class DynamicMeta(type):
@@ -101,7 +101,7 @@ class BaseEntity(models.Model):
         self.save(update_fields=["status", "update_date"])
 
     def update_fields(self, **kwargs):
-        """批量更新字��"""
+        """批量更新字段"""
         for field, value in kwargs.items():
             if hasattr(self, field):
                 setattr(self, field, value)
@@ -140,7 +140,7 @@ class BaseEntity(models.Model):
 
 class BaseSerializer(serializers.ModelSerializer):
     """
-    自定义序列化器基类，���于序列化 BaseEntity 中的公共字段
+    自定义序列化器基类，基于序列化 BaseEntity 中的公共字段
     增加了更多序列化功能和字段处理
     """
 
@@ -336,7 +336,14 @@ class CoreViewSet(viewsets.ModelViewSet):
 
         params = request.query_params.dict()
         params.update(kwargs)
-        return f"{self.__class__.__name__}__{request.method}__{request.path}__{hash(frozenset(params.items()))}"
+        user_info = request.user.username if request.user.is_authenticated else "anonymous"
+        return f"{self.__class__.__name__}__{request.method}__{request.path}__{user_info}__{hash(frozenset(params.items()))}"
+
+    def _clear_cache(self, instance):
+        """清除相关缓存"""
+        cache_key = self.get_cache_key(pk=instance.pk)
+        if cache_key:
+            cache.delete(cache_key)
 
     def get_from_cache(self, cache_key):
         """从缓存获取数据"""
@@ -371,12 +378,16 @@ class CoreViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """创建对象"""
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            instance = serializer.save(create_by=request.user)
-            self.log_operation(request, "create", instance)
-            return JsonResult(data=serializer.data, msg="创建成功", code=201)
-        return JsonResult(msg=serializer.errors_messages.get("detail", "创建失败"), code=400)
+        try:
+            serializer = self.get_serializer(data=request.data)
+            if serializer.is_valid():
+                instance = serializer.save(create_by=request.user)
+                self._log_operation(request, "create", instance)
+                return JsonResult(data=serializer.data, msg="创建成功", code=201)
+            return JsonResult(msg=serializer.errors_messages.get("detail", "创建失败"), code=400)
+        except Exception as e:
+            logger.error(f"Create operation failed: {str(e)}")
+            return JsonResult(msg=f"创建失败: {str(e)}", code=500)
 
     def update(self, request, *args, **kwargs):
         """更新对象"""
@@ -384,9 +395,7 @@ class CoreViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
 
         # 清除相关缓存
-        cache_key = self.get_cache_key(pk=instance.pk)
-        if cache_key:
-            cache.delete(cache_key)
+        self._clear_cache(instance)
 
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         if serializer.is_valid():
@@ -400,9 +409,7 @@ class CoreViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
 
         # 清除相关缓存
-        cache_key = self.get_cache_key(pk=instance.pk)
-        if cache_key:
-            cache.delete(cache_key)
+        self._clear_cache(instance)
 
         instance.remove()  # 使用软删除
         self.log_operation(request, "delete", instance)
