@@ -1,0 +1,320 @@
+# CI/CD Pipeline Configuration / CI/CD流水线配置
+# For GitLab CI/CD / 适用于GitLab CI/CD
+
+stages:
+  - test          # Run tests / 运行测试
+  - security      # Security scanning / 安全扫描
+  - build         # Build Docker images / 构建Docker镜像
+  - deploy        # Deploy to environments / 部署到环境
+
+variables:
+  # Docker images / Docker镜像
+  PYTHON_IMAGE: python:3.11-slim-bullseye
+  DOCKER_TLS_CERTDIR: "/certs"
+
+  # Cache configuration / 缓存配置
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+  # Disable TLS for local Docker / 为本地Docker禁用TLS
+  DOCKER_TLS_CERTDIR: ""
+
+# Cache configuration / 缓存配置
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .cache/pip
+    - venv/
+
+# Test stage / 测试阶段
+test:
+  stage: test
+  image: $PYTHON_IMAGE
+
+  coverage: '/TOTAL\s+\d+\s+\d+\s+(\d+%)$/'
+
+  services:
+    - mysql:8.0
+    - redis:7-alpine
+
+  variables:
+    MYSQL_DATABASE: test_db
+    MYSQL_USER: test_user
+    MYSQL_PASSWORD: test_password
+    MYSQL_ROOT_PASSWORD: test_root_password
+    REDIS_URL: redis://redis:6379/0
+
+  before_script:
+    # Install system dependencies / 安装系统依赖
+    - apt-get update -qq && apt-get install -y -qq git curl mariadb-client
+
+    # Install Python dependencies / 安装Python依赖
+    - python -m venv venv
+    - source venv/bin/activate
+    - pip install --upgrade pip setuptools wheel
+
+    # Install project dependencies / 安装项目依赖
+    - pip install -r requirements/local.txt
+
+    # Copy environment file / 复制环境文件
+    - cp .env.example .env
+
+  script:
+    # Code quality checks / 代码质量检查
+    - echo "Running code quality checks..."
+    - black --check .
+    - isort --check-only .
+    - ruff check .
+    - mypy .
+
+    # Security check / 安全检查
+    - echo "Running security scan..."
+    - bandit -r . -f json -o bandit-report.json || true
+
+    # Run tests / 运行测试
+    - echo "Running tests..."
+    - pytest --cov=apps --cov=utils --cov-report=xml --cov-report=html --cov-report=term -v
+
+  artifacts:
+    when: always
+    paths:
+      - htmlcov/
+      - coverage.xml
+      - bandit-report.json
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    expire_in: 30 days
+
+  only:
+    - branches
+    - merge_requests
+
+# Security scanning stage / 安全扫描阶段
+security:
+  stage: security
+  image: $PYTHON_IMAGE
+
+  before_script:
+    - pip install safety bandit
+
+  script:
+    # Check for known security vulnerabilities in dependencies / 检查依赖中的已知安全漏洞
+    - safety check --json --output safety-report.json || true
+
+    # Run Bandit security linter / 运行Bandit安全检查器
+    - bandit -r . -f json -o bandit-report.json || true
+
+    # Dependency check / 依赖检查
+    - pip install pip-audit
+    - pip-audit --format json --output pip-audit-report.json || true
+
+  artifacts:
+    when: always
+    paths:
+      - safety-report.json
+      - bandit-report.json
+      - pip-audit-report.json
+    expire_in: 30 days
+
+  allow_failure: true
+
+  only:
+    - branches
+    - merge_requests
+
+# Build stage / 构建阶段
+build:
+  stage: build
+  image: docker:24-dind
+
+  services:
+    - docker:24-dind
+
+  variables:
+    BUILD_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    LATEST_IMAGE: $CI_REGISTRY_IMAGE:latest
+
+  before_script:
+    # Login to Docker registry / 登录Docker registry
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+
+  script:
+    # Build Docker image / 构建Docker镜像
+    - echo "Building Docker image..."
+    - docker build
+        --file docker/production/django/Dockerfile
+        --tag $BUILD_IMAGE
+        --tag $LATEST_IMAGE
+        --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        --build-arg VCS_REF=$CI_COMMIT_SHA
+        .
+
+    # Push to registry / 推送到registry
+    - echo "Pushing Docker image to registry..."
+    - docker push $BUILD_IMAGE
+    - docker push $LATEST_IMAGE
+
+    # Scan image for vulnerabilities / 扫描镜像漏洞
+    - docker scan $BUILD_IMAGE || true
+
+  only:
+    - main
+    - master
+    - develop
+    - tags
+
+# Deploy to staging / 部署到staging环境
+deploy_staging:
+  stage: deploy
+  image: docker:24
+
+  services:
+    - docker:24-dind
+
+  variables:
+    DEPLOY_ENVIRONMENT: staging
+    COMPOSE_FILE: docker-compose.staging.yml
+
+  before_script:
+    # Configure SSH / 配置SSH
+    - 'which ssh-agent || ( apk add --update openssh-client )'
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$STAGING_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+
+  script:
+    # Deploy using docker-compose / 使用docker-compose部署
+    - echo "Deploying to $DEPLOY_ENVIRONMENT..."
+    - scp docker-compose.*yml $STAGING_USER@$STAGING_HOST:/opt/myapp/
+    - ssh $STAGING_USER@$STAGING_HOST "cd /opt/myapp && docker-compose -f $COMPOSE_FILE pull"
+    - ssh $STAGING_USER@$STAGING_HOST "cd /opt/myapp && docker-compose -f $COMPOSE_FILE up -d"
+    - ssh $STAGING_USER@$STAGING_HOST "cd /opt/myapp && python manage.py migrate --noinput"
+    - ssh $STAGING_USER@$STAGING_HOST "cd /opt/myapp && python manage.py collectstatic --noinput"
+
+  environment:
+    name: staging
+    url: https://staging.example.com
+
+  when: manual
+
+  only:
+    - develop
+
+# Deploy to production / 部署到生产环境
+deploy_production:
+  stage: deploy
+  image: docker:24
+
+  services:
+    - docker:24-dind
+
+  variables:
+    DEPLOY_ENVIRONMENT: production
+    COMPOSE_FILE: docker-compose.production.yml
+
+    # Blue-green deployment / 蓝绿部署
+    BLUE_PORT: 8000
+    GREEN_PORT: 8001
+
+  before_script:
+    # Configure SSH / 配置SSH
+    - 'which ssh-agent || ( apk add --update openssh-client )'
+    - eval $(ssh-agent -s)
+    - echo "$PRODUCTION_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$PRODUCTION_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+
+  script:
+    # Blue-green deployment strategy / 蓝绿部署策略
+    - echo "Deploying to $DEPLOY_ENVIRONMENT using blue-green strategy..."
+
+    # Determine which environment is currently active / 确定当前活动的环境
+    - |
+      CURRENT_ENV=$(ssh $PRODUCTION_USER@$PRODUCTION_HOST "docker ps --filter 'name=myapp_django_blue' --format '{{.Names}}'" || echo "")
+      if [[ "$CURRENT_ENV" == *"blue"* ]]; then
+        NEW_ENV="green"
+        OLD_ENV="blue"
+      else
+        NEW_ENV="blue"
+        OLD_ENV="green"
+      fi
+
+    # Deploy to new environment / 部署到新环境
+    - echo "Deploying to $NEW_ENV environment..."
+    - scp docker-compose.*yml $PRODUCTION_USER@$PRODUCTION_HOST:/opt/myapp/
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose -f $COMPOSE_FILE pull"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose -f $COMPOSE_FILE -p $NEW_ENV up -d"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose -p $NEW_ENV exec -T django python manage.py migrate --noinput"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose -p $NEW_ENV exec -T django python manage.py collectstatic --noinput"
+
+    # Health check for new deployment / 新部署的健康检查
+    - sleep 30
+    - |
+      for i in {1..10}; do
+        if ssh $PRODUCTION_USER@$PRODUCTION_HOST "docker ps | grep myapp_django_$NEW_ENV | grep healthy"; then
+          echo "Health check passed for $NEW_ENV"
+          break
+        fi
+        if [ $i -eq 10 ]; then
+          echo "Health check failed for $NEW_ENV, rolling back..."
+          ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose -p $NEW_ENV down"
+          exit 1
+        fi
+        sleep 10
+      done
+
+    # Switch traffic to new environment / 切换流量到新环境
+    - echo "Switching traffic to $NEW_ENV..."
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "docker exec myapp_nginx nginx -s reload"
+
+    # Keep old environment running for quick rollback / 保持旧环境运行以便快速回滚
+    - echo "Deployment successful! Old environment ($OLD_ENV) kept for rollback."
+
+  environment:
+    name: production
+    url: https://example.com
+
+  when: manual
+
+  only:
+    - main
+    - master
+    - tags
+
+# Rollback production / 生产环境回滚
+rollback_production:
+  stage: deploy
+  image: docker:24
+
+  services:
+    - docker:24-dind
+
+  before_script:
+    - 'which ssh-agent || ( apk add --update openssh-client )'
+    - eval $(ssh-agent -s)
+    - echo "$PRODUCTION_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+
+  script:
+    # Rollback to previous version / 回滚到上一个版本
+    - echo "Rolling back production..."
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose down"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && git checkout HEAD~1"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose -f docker-compose.production.yml up -d"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "cd /opt/myapp && docker-compose exec -T django python manage.py migrate --noinput"
+    - ssh $PRODUCTION_USER@$PRODUCTION_HOST "docker exec myapp_nginx nginx -s reload"
+
+  environment:
+    name: production
+    action: rollback
+
+  when: manual
+
+  only:
+    - main
+    - master

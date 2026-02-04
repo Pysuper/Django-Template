@@ -8,6 +8,65 @@ import environ
 # noinspection PyUnresolvedReferences
 from utils.log.logger import *
 
+# Import security configuration
+from config.settings.security import (
+    get_secret_key,
+    validate_security_settings,
+    AUTH_PASSWORD_VALIDATORS,
+    PASSWORD_POLICY,
+    SESSION_POLICY,
+    LOGIN_ATTEMPT_POLICY,
+    SECURE_SSL_REDIRECT,
+    SECURE_PROXY_SSL_HEADER,
+    SECURE_HSTS_SECONDS,
+    SECURE_HSTS_INCLUDE_SUBDOMAINS,
+    SECURE_HSTS_PRELOAD,
+    SESSION_COOKIE_SECURE,
+    SESSION_COOKIE_HTTPONLY,
+    SESSION_COOKIE_SAMESITE,
+    CSRF_COOKIE_SECURE,
+    CSRF_COOKIE_HTTPONLY,
+    CSRF_COOKIE_SAMESITE,
+    CSRF_TRUSTED_ORIGINS,
+    SECURE_CONTENT_TYPE_NOSNIFF,
+    SECURE_BROWSER_XSS_FILTER,
+    X_FRAME_OPTIONS,
+    SECURE_REFERRER_POLICY,
+    SENSITIVE_FIELDS,
+    SENSITIVE_DATA_MASK,
+)
+
+# Import multi-tenancy configuration
+from config.settings.multi_tenant import (
+    MULTI_TENANT_ENABLED,
+    MULTI_TENANT_REQUIRED,
+    TENANT_IDENTIFICATION,
+    DEFAULT_TENANT_CODE,
+    TENANT_ISOLATION_EXCLUDE_PATHS,
+    DEFAULT_MAX_USERS,
+    DEFAULT_TENANT_EXPIRE_DAYS,
+    DEFAULT_TENANT_ROLE_CODE,
+    RBAC_ENABLED,
+    PERMISSION_CACHE_TIMEOUT,
+    DATA_SCOPE_ENABLED,
+    DEFAULT_DATA_SCOPE,
+    MENU_PERMISSION_ENABLED,
+    BUTTON_PERMISSION_ENABLED,
+    ALLOW_CROSS_TENANT_ACCESS,
+    TENANT_SESSION_ISOLATION,
+    MAX_ROLES_PER_TENANT,
+    MAX_MENUS_PER_TENANT,
+    MAX_PERMISSIONS_PER_TENANT,
+    MAX_ROLES_PER_USER,
+    LOG_TENANT_OPERATIONS,
+    LOG_PERMISSION_FAILURES,
+    TENANT_CACHE_ENABLED,
+    TENANT_CACHE_TIMEOUT,
+    PERMISSION_CACHE_ENABLED,
+    ALLOW_AUTO_TENANT_CREATION,
+    RESERVED_TENANT_CODES,
+)
+
 # START
 # ------------------------------------------------------------------------------
 ROOT_DIR = Path(__file__).resolve(strict=True).parent.parent.parent
@@ -21,6 +80,13 @@ if READ_DOT_ENV_FILE:
 # GENERAL
 # ------------------------------------------------------------------------------
 DEBUG = env.bool("DJANGO_DEBUG", default=True)
+
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = get_secret_key()
+
+# Validate security settings
+validate_security_settings(debug=DEBUG)
+
 TIME_ZONE = "Asia/Shanghai"
 LANGUAGE_CODE = "en-us"
 SITE_ID = 1
@@ -31,11 +97,20 @@ LOCALE_PATHS = [str(ROOT_DIR / "locale")]
 
 # SECURITY
 # ------------------------------------------------------------------------------
-ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"] if DEBUG else ["*"])
+# In production, ALWAYS set DJANGO_ALLOWED_HOSTS to your actual domain(s)
+# Never use ["*"] in production as it's a security vulnerability
+ALLOWED_HOSTS = env.list(
+    "DJANGO_ALLOWED_HOSTS",
+    default=["localhost", "127.0.0.1", "0.0.0.0"] if DEBUG else []
+)
+if not ALLOWED_HOSTS and not DEBUG:
+    raise ImproperlyConfigured(
+        "DJANGO_ALLOWED_HOSTS must be set in production. "
+        "Add it to your .env file."
+    )
+
 CORS_ALLOW_ALL_ORIGINS = env.bool("DJANGO_CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 CORS_ALLOWED_ORIGINS = env.list("DJANGO_CORS_ALLOWED_ORIGINS", default=[])
-
-DJANGO_ALLOWED_HOSTS = ["*"]
 
 # DATABASES
 # ------------------------------------------------------------------------------
@@ -143,12 +218,7 @@ PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
     "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
 ]
-AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
-]
+# AUTH_PASSWORD_VALIDATORS is now imported from config.settings.security
 
 # MIDDLEWARE
 # ------------------------------------------------------------------------------
@@ -225,10 +295,18 @@ FIXTURE_DIRS = (str(ROOT_DIR / "fixtures"),)
 
 # SECURITY
 # ------------------------------------------------------------------------------
-SESSION_COOKIE_HTTPONLY = True
-CSRF_COOKIE_HTTPONLY = True
-SECURE_BROWSER_XSS_FILTER = True
-X_FRAME_OPTIONS = "DENY"
+# Session and CSRF security settings are now imported from config.settings.security
+# The following are set in security.py:
+# - SESSION_COOKIE_HTTPONLY
+# - SESSION_COOKIE_SECURE
+# - SESSION_COOKIE_SAMESITE
+# - CSRF_COOKIE_HTTPONLY
+# - CSRF_COOKIE_SECURE
+# - CSRF_COOKIE_SAMESITE
+# - SECURE_BROWSER_XSS_FILTER
+# - X_FRAME_OPTIONS
+# - SECURE_SSL_REDIRECT
+# - SECURE_HSTS_* settings
 
 # EMAIL
 # ------------------------------------------------------------------------------
@@ -605,20 +683,45 @@ ALIYUN_SMS = {
 }
 
 # 初始登录密码
-START_PASSWORD = "123456"
+# SECURITY WARNING: Change this default password immediately in production!
+# Set START_PASSWORD environment variable to a secure password
+START_PASSWORD = env.str("START_PASSWORD", default="ChangeMe123!")
 
 
 # 读取密钥文件
 def read_key(file_path):
     """读取密钥文件内容"""
-    with open(file_path, "r") as file:
-        return file.read()
+    try:
+        with open(file_path, "r") as file:
+            return file.read()
+    except FileNotFoundError:
+        # In development, if keys don't exist, return None
+        # Views should handle this gracefully
+        if DEBUG:
+            import warnings
+            warnings.warn(
+                f"RSA key file not found: {file_path}. "
+                "Encryption features will be disabled."
+            )
+            return None
+        raise ImproperlyConfigured(
+            f"RSA key file not found: {file_path}. "
+            "Required in production."
+        )
 
 
 # RSA 密钥配置，解密用户密码
-RSA_PUBLIC_KEY = read_key(str(ROOT_DIR / "config/settings/pub.key"))
-RSA_PRIVATE_KEY = read_key(str(ROOT_DIR / "config/settings/pri.key"))
-RSA_PASSWORD = env.str("DJANGO_RSA_PASSWORD", default="change_me_in_production")
+# Keys are now stored in the secrets/ directory for better security
+RSA_PUBLIC_KEY = read_key(str(ROOT_DIR / "secrets/pub.key"))
+RSA_PRIVATE_KEY = read_key(str(ROOT_DIR / "secrets/pri.key"))
+RSA_PASSWORD = env.str("DJANGO_RSA_PASSWORD", default=None)
+
+# Validate RSA configuration
+if not DEBUG and (not RSA_PUBLIC_KEY or not RSA_PRIVATE_KEY or not RSA_PASSWORD):
+    raise ImproperlyConfigured(
+        "RSA keys and password must be configured in production. "
+        "Set DJANGO_RSA_PASSWORD and ensure keys exist in secrets/ directory."
+    )
 
 # 用户缓存默认闲置时间，单位：秒
 USER_CACHE_IDLE_TIME = 3600

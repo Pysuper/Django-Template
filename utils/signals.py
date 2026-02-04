@@ -1,216 +1,252 @@
+"""
+Utility Signals Module / 工具信号模块
+
+This module contains base signal processor classes and system-level signal handlers.
+此模块包含基础信号处理器类和系统级信号处理器。
+
+User-specific signals have been moved to apps/users/signals.py to avoid circular dependencies.
+用户特定的信号已移至 apps/users/signals.py 以避免循环依赖。
+"""
+
 import logging
-from datetime import datetime
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
-from django.core.cache import cache
 from django.db import models, transaction
-from django.db.models.signals import post_migrate, post_save, pre_delete, pre_save
-from django.dispatch import Signal, receiver
+from django.db.models.signals import post_migrate
+from django.dispatch import receiver
 
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
-# 自定义信号
-user_logged_in = Signal()  # 用户登录信号
-user_logged_out = Signal()  # 用户登出信号
-user_login_failed = Signal()  # 用户登录失败信号
-user_password_changed = Signal()  # 用户密码修改信号
-user_password_reset = Signal()  # 用户密码重置信号
-
 
 class SignalProcessor:
-    """信号处理器基类"""
+    """
+    Signal processor base class / 信号处理器基类
+
+    Provides common methods for signal handlers.
+    为信号处理器提供通用方法。
+    """
 
     @classmethod
     def log_changes(cls, instance: models.Model, old_data: Optional[Dict[str, Any]] = None) -> None:
-        """记录数据变更"""
+        """
+        Log data changes / 记录数据变更
+
+        Args:
+            instance: Model instance
+            old_data: Dictionary of old field values
+        """
         if old_data:
             changes = {}
             for field, old_value in old_data.items():
                 new_value = getattr(instance, field, None)
                 if old_value != new_value:
                     changes[field] = {"old": old_value, "new": new_value}
+
             if changes:
-                logger.info(f"数据变更 - 模型: {instance.__class__.__name__}, " f"ID: {instance.pk}, 变更: {changes}")
+                logger.info(
+                    f"Data changed - Model: {instance.__class__.__name__}, "
+                    f"ID: {instance.pk}, Changes: {changes}"
+                )
 
     @classmethod
     def clear_cache(cls, instance: models.Model) -> None:
-        """清理缓存"""
+        """
+        Clear cache for the model instance / 清理模型实例的缓存
+
+        Args:
+            instance: Model instance
+        """
+        from django.core.cache import cache
+
         model_name = instance.__class__.__name__.lower()
-        cache_keys = [f"{model_name}_{instance.pk}", f"{model_name}_list", f"{model_name}_all"]
+        cache_keys = [
+            f"{model_name}_{instance.pk}",
+            f"{model_name}_list",
+            f"{model_name}_all"
+        ]
         cache.delete_many(cache_keys)
 
 
-class UserSignals(SignalProcessor):
-    """用户相关信号处理"""
-
-    @classmethod
-    @receiver(post_save, sender=User)
-    def handle_user_create(cls, sender: Type[User], instance: User, created: bool, **kwargs) -> None:
-        """处理用户创建"""
-        if created:
-            # 加密密码
-            if not instance.password.startswith("pbkdf2_sha256$"):
-                instance.set_password(instance.password)
-                instance.save()
-
-            # 创建用户配置
-            cls.create_user_settings(instance)
-
-            # 分配默认角色
-            cls.assign_default_role(instance)
-
-            logger.info(f"新用户创建成功: {instance.username}")
-
-    @classmethod
-    @receiver(pre_save, sender=User)
-    def handle_user_update(cls, sender: Type[User], instance: User, **kwargs) -> None:
-        """处理用户更新"""
-        if instance.pk:
-            try:
-                old_instance = sender.objects.get(pk=instance.pk)
-                old_data = {
-                    "username": old_instance.username,
-                    "email": old_instance.email,
-                    "is_active": old_instance.is_active,
-                    "is_staff": old_instance.is_staff,
-                }
-                cls.log_changes(instance, old_data)
-                cls.clear_cache(instance)
-            except User.DoesNotExist:
-                pass
-
-    @classmethod
-    @receiver(pre_delete, sender=User)
-    def handle_user_delete(cls, sender: Type[User], instance: User, **kwargs) -> None:
-        """处理用户删除"""
-        # 清理用户数据
-        cls.cleanup_user_data(instance)
-        cls.clear_cache(instance)
-        logger.info(f"用户删除: {instance.username}")
-
-    @classmethod
-    @receiver(user_logged_in)
-    def handle_user_login(cls, sender: Type[User], user: User, request: Any, **kwargs) -> None:
-        """处理用户登录"""
-        # 更新登录信息
-        user.last_login = datetime.now()
-        user.login_count = getattr(user, "login_count", 0) + 1
-        user.save(update_fields=["last_login", "login_count"])
-
-        # 记录登录日志
-        ip = request.META.get("REMOTE_ADDR")
-        user_agent = request.META.get("HTTP_USER_AGENT")
-        logger.info(f"用户登录 - 用户: {user.username}, IP: {ip}, 设备: {user_agent}")
-
-    @staticmethod
-    def create_user_settings(user: User) -> None:
-        """创建用户配置"""
-        from apps.users.models import UserSettings
-
-        UserSettings.objects.create(user=user, theme="light", language="zh-hans", timezone="Asia/Shanghai")
-
-    @staticmethod
-    def assign_default_role(user: User) -> None:
-        """分配默认角色"""
-        from apps.users.models import Role
-
-        default_role = Role.objects.filter(is_default=True).first()
-        if default_role:
-            user.roles.add(default_role)
-
-    @staticmethod
-    def cleanup_user_data(user: User) -> None:
-        """清理用户数据"""
-        # 这里可以添加清理用户相关数据的逻辑
-        pass
-
-
 class SystemSignals(SignalProcessor):
-    """系统相关信号处理"""
+    """
+    System-related signal handlers / 系统相关信号处理器
+
+    Handles post-migration operations like creating default data.
+    处理迁移后操作，如创建默认数据。
+    """
 
     @classmethod
     @receiver(post_migrate)
     def handle_post_migrate(cls, sender: Any, **kwargs) -> None:
-        """处理迁移后操作"""
+        """
+        Handle post-migration operations / 处理迁移后操作
+
+        Args:
+            sender: The sender of the signal
+            **kwargs: Additional keyword arguments
+        """
         try:
             with transaction.atomic():
-                # 创建超级管理员
+                # Create superuser / 创建超级管理员
                 cls.create_superuser()
 
-                # 创建默认角色
+                # Create default roles / 创建默认角色
                 cls.create_default_roles()
 
-                # 创建默认权限组
+                # Create default permission groups / 创建默认权限组
                 cls.create_default_groups()
 
-                # 初始化系统配置
+                # Initialize system settings / 初始化系统设置
                 cls.init_system_settings()
 
         except Exception as e:
-            logger.error(f"系统初始化失败: {str(e)}")
+            logger.error(f"System initialization failed: {str(e)}")
 
     @staticmethod
     def create_superuser() -> None:
-        """创建超级管理员"""
+        """
+        Create superuser if not exists / 如果不存在则创建超级管理员
+
+        Note: Update the default password in production!
+        注意：在生产环境中更新默认密码！
+        """
+        from django.conf import settings
+
         if not User.objects.filter(username="admin").exists():
             User.objects.create_superuser(
-                username="admin", password="admin123", email="admin@example.com", phone="13800000000"
+                username="admin",
+                password=getattr(settings, 'START_PASSWORD', 'admin123'),
+                email="admin@example.com",
+                phone="13800000000"
             )
-            logger.info("成功创建超级管理员账号")
+            logger.info("Superuser account created successfully")
 
     @staticmethod
     def create_default_roles() -> None:
-        """创建默认角色"""
+        """
+        Create default roles / 创建默认角色
+
+        Creates standard roles for the application if they don't exist.
+        如果默认角色不存在则创建它们。
+        """
         from apps.users.models import Role
 
         default_roles = [
-            {"name": "超级管理员", "code": "admin", "level": 1, "is_default": False, "description": "系统超级管理员"},
-            {"name": "普通用户", "code": "user", "level": 2, "is_default": True, "description": "普通用户"},
+            {
+                "name": "Super Administrator",
+                "code": "admin",
+                "level": 1,
+                "is_default": False,
+                "description": "System super administrator / 系统超级管理员"
+            },
+            {
+                "name": "Regular User",
+                "code": "user",
+                "level": 2,
+                "is_default": True,
+                "description": "Regular user / 普通用户"
+            },
         ]
 
         for role_data in default_roles:
-            Role.objects.get_or_create(code=role_data["code"], defaults=role_data)
-        logger.info("成功创建默认角色")
+            Role.objects.get_or_create(
+                code=role_data["code"],
+                defaults=role_data
+            )
+        logger.info("Default roles created successfully")
 
     @staticmethod
     def create_default_groups() -> None:
-        """创建默认权限组"""
+        """
+        Create default permission groups / 创建默认权限组
+
+        Creates standard permission groups with appropriate permissions.
+        创建具有适当权限的标准权限组。
+        """
         default_groups = [
-            {"name": "管理员组", "permissions": ["add_user", "change_user", "delete_user", "view_user"]},
-            {"name": "普通用户组", "permissions": ["view_user"]},
+            {
+                "name": "Administrators",
+                "permissions": [
+                    "add_user", "change_user", "delete_user", "view_user"
+                ]
+            },
+            {
+                "name": "Regular Users",
+                "permissions": ["view_user"]
+            },
         ]
 
         for group_data in default_groups:
             group, created = Group.objects.get_or_create(name=group_data["name"])
             if created:
-                permissions = Permission.objects.filter(codename__in=group_data["permissions"])
+                permissions = Permission.objects.filter(
+                    codename__in=group_data["permissions"]
+                )
                 group.permissions.set(permissions)
-        logger.info("成功创建默认权限组")
+        logger.info("Default permission groups created successfully")
 
     @staticmethod
     def init_system_settings() -> None:
-        """初始化系统配置"""
+        """
+        Initialize system settings / 初始化系统设置
+
+        Creates default system configuration settings.
+        创建默认系统配置设置。
+        """
         from apps.system.models import SystemConfig
 
         default_settings = [
             {
                 "key": "site_name",
-                "value": "后台管理系统",
+                "value": "Django Admin System",
                 "type": "string",
-                "description": "站点名称",
+                "description": "Site name / 站点名称"
             },
             {
                 "key": "site_description",
-                "value": "基于Django的后台管理系统",
+                "value": "Django-based admin system",
                 "type": "string",
-                "description": "站点描述",
+                "description": "Site description / 站点描述"
             },
         ]
 
         for setting in default_settings:
-            SystemConfig.objects.get_or_create(key=setting["key"], defaults=setting)
-        logger.info("成功初始化系统配置")
+            SystemConfig.objects.get_or_create(
+                key=setting["key"],
+                defaults=setting
+            )
+        logger.info("System settings initialized successfully")
+
+
+# Legacy signal handlers (for backward compatibility)
+# These are kept for backward compatibility but should not be used in new code
+# 遗留信号处理器（用于向后兼容），不应在新代码中使用
+
+def create_default_login_properties(sender, **kwargs):
+    """
+    Legacy: Create default login properties
+
+    DEPRECATED: This function is deprecated. Use apps.users.signals instead.
+    已弃用：此函数已弃用。请改用 apps.users.signals。
+    """
+    logger.warning(
+        "create_default_login_properties is deprecated. "
+        "Use apps.users.signals instead."
+    )
+
+
+def create_user(sender, instance, created, **kwargs):
+    """
+    Legacy: Create user handler
+
+    DEPRECATED: This function is deprecated. Use apps.users.signals instead.
+    已弃用：此函数已弃用。请改用 apps.users.signals。
+    """
+    logger.warning(
+        "create_user signal handler is deprecated. "
+        "Use apps.users.signals instead."
+    )

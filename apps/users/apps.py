@@ -14,34 +14,30 @@ class UsersConfig(AppConfig):
         2. 导入模型类
         3. 初始化缓存
         4. 加载配置等
+
+        Django app initialization operations when ready:
+        1. Register signal handlers
+        2. Import model classes
+        3. Initialize cache
+        4. Load configurations
         """
-        # 导入信号处理器
-        from utils.signals import create_default_login_properties, create_user
-        from django.db.models.signals import post_migrate, post_save
-        from django.contrib.auth import get_user_model
+        # Import signal handlers / 导入信号处理器
+        # This triggers the @receiver decorators to register signals
+        # 这会触发 @receiver 装饰器注册信号
+        import apps.users.signals
 
-        # 注册数据库迁移后的信号处理
-        post_migrate.connect(create_default_login_properties, sender=self)
-
-        # 注册用户模型的保存信号处理
-        User = get_user_model()
-        post_save.connect(create_user, sender=User)
-
-        # 初始化缓存
+        # Initialize cache / 初始化缓存
         from django.core.cache import cache
-
         cache.clear()
 
-        # 加载系统配置
+        # Load system configuration / 加载系统配置
         try:
             from django.conf import settings
-
             settings.INSTALLED_APPS
         except ImportError:
             pass
 
-        # 输出应用启动日志
+        # Log app initialization / 记录应用初始化日志
         import logging
-
         logger = logging.getLogger(__name__)
-        logger.info("用户管理应用初始化完成")
+        logger.info("User management app initialized successfully / 用户管理应用初始化完成")

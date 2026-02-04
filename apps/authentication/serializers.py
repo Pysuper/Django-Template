@@ -4,7 +4,7 @@ from django.utils.translation import gettext_lazy as _
 from drf_spectacular.utils import extend_schema_serializer
 from rest_framework import serializers
 
-from apps.core.serializers import BaseModelSerializer
+from utils.drf.serializers import BaseSerializer as BaseModelSerializer
 
 User = get_user_model()
 

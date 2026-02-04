@@ -1,20 +1,41 @@
+# Core Django
 Django==4.2.17
-djangorestframework==3.14.0
-django-filter==23.5
-django-cors-headers==4.3.1
+djangorestframework==3.15.2
+django-filter==24.3
+django-cors-headers==4.6.0
+
+# Database
 django-redis==5.4.0
-django-celery-beat==2.5.0
-django-celery-results==2.5.1
-celery==5.3.6
-redis==5.0.1
+redis==5.0.8
 psycopg2-binary==2.9.9
-gunicorn==21.2.0
-uvicorn==0.25.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
-types-redis==4.6.0.20240106
-types-requests==2.31.0.20240106
-# mypy==1.8.0
+mysqlclient==2.2.4
+
+# Task Queue
+django-celery-beat==2.6.0
+django-celery-results==2.5.1
+celery==5.4.0
+
+# Authentication & Security
+djangorestframework-simplejwt==5.4.0
+django-allauth==0.61.1
+cryptography==42.0.8
+
+# API & Serialization
+drf-spectacular==0.27.2
+pydantic==2.10.4
+pydantic-settings==2.6.1
+
+# ASGI Server
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+
+# Type Stubs
+types-redis==4.6.0.20240425
+types-requests==2.32.0.20241016
 django-stubs==4.2.7
-djangorestframework-stubs==3.14.5
-djangorestframework-simplejwt==5.3.1
+djangorestframework-stubs==3.15.0
+
+# Utilities
+python-dotenv==1.0.1
+environs==11.0.0
+

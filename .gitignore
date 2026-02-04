@@ -141,6 +141,12 @@ venv.bak/
 .spyderproject
 .spyproject
 
+# Security - RSA keys and secrets
+*.key
+secrets/
+config/settings/*.key
+!config/settings/*.key.example
+
 # Rope project settings
 .ropeproject
 

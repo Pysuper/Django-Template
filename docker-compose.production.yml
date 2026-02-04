@@ -1,0 +1,317 @@
+# Production Docker Compose Configuration / 生产环境Docker Compose配置
+# Includes security hardening, health checks, and resource limits / 包含安全加固、健康检查和资源限制
+
+version: '3.8'
+
+services:
+  # Django Application / Django应用
+  django:
+    build:
+      context: .
+      dockerfile: ./docker/production/django/Dockerfile
+    image: myapp_django:production
+    container_name: myapp_django
+    restart: unless-stopped
+
+    # Security: Run as non-root user / 安全：以非root用户运行
+    user: django
+
+    # Resource limits / 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Environment / 环境
+    env_file:
+      - .env.production
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+
+    # Volumes / 卷
+    volumes:
+      - django_static:/app/staticfiles
+      - django_media:/app/media
+      - django_logs:/app/logs
+      - django_secrets:/app/secrets:ro
+
+    # Ports / 端口
+    expose:
+      - "8000"
+
+    # Health check / 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Networks / 网络
+    networks:
+      - backend
+      - frontend
+
+    # Dependencies / 依赖
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Nginx Reverse Proxy / Nginx反向代理
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: myapp_nginx
+    restart: unless-stopped
+
+    # Resource limits / 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+    # Ports / 端口
+    ports:
+      - "80:80"
+      - "443:443"
+
+    # Volumes / 卷
+    volumes:
+      - ./docker/production/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/production/nginx/ssl:/etc/nginx/ssl:ro
+      - django_static:/static:ro
+      - django_media:/media:ro
+      - nginx_logs:/var/log/nginx
+
+    # Health check / 健康检查
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+    # Networks / 网络
+    networks:
+      - frontend
+
+    # Dependencies / 依赖
+    depends_on:
+      django:
+        condition: service_healthy
+
+  # MySQL Database / MySQL数据库
+  db:
+    image: mysql:8.0
+    container_name: myapp_mysql
+    restart: unless-stopped
+
+    # Resource limits / 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Environment / 环境
+    env_file:
+      - .env.production
+
+    # Volumes / 卷
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/production/mysql/init:/docker-entrypoint-initdb.d:ro
+      - mysql_logs:/var/log/mysql
+
+    # Health check / 健康检查
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Networks / 网络
+    networks:
+      - backend
+
+    # Security options / 安全选项
+    security_opt:
+      - no-new-privileges:true
+
+  # Redis Cache / Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: myapp_redis
+    restart: unless-stopped
+
+    # Resource limits / 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+    # Command with password / 带密码的命令
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password}
+
+    # Volumes / 卷
+    volumes:
+      - redis_data:/data
+
+    # Health check / 健康检查
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    # Networks / 网络
+    networks:
+      - backend
+
+    # Security options / 安全选项
+    security_opt:
+      - no-new-privileges:true
+
+  # Celery Worker / Celery工作进程
+  celery_worker:
+    build:
+      context: .
+      dockerfile: ./docker/production/django/Dockerfile
+    image: myapp_django:production
+    container_name: myapp_celery_worker
+    restart: unless-stopped
+
+    # Security: Run as non-root user / 安全：以非root用户运行
+    user: django
+
+    # Resource limits / 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Environment / 环境
+    env_file:
+      - .env.production
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+
+    # Volumes / 卷
+    volumes:
+      - django_media:/app/media
+      - django_logs:/app/logs
+      - django_secrets:/app/secrets:ro
+
+    # Command / 命令
+    command: celery -A config worker -l INFO
+
+    # Health check / 健康检查
+    healthcheck:
+      test: ["CMD", "celery", "-A", "config", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # Networks / 网络
+    networks:
+      - backend
+
+    # Dependencies / 依赖
+    depends_on:
+      - db
+      - redis
+
+  # Celery Beat Scheduler / Celery Beat调度器
+  celery_beat:
+    build:
+      context: .
+      dockerfile: ./docker/production/django/Dockerfile
+    image: myapp_django:production
+    container_name: myapp_celery_beat
+    restart: unless-stopped
+
+    # Security: Run as non-root user / 安全：以非root用户运行
+    user: django
+
+    # Resource limits / 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # Environment / 环境
+    env_file:
+      - .env.production
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+
+    # Volumes / 卷
+    volumes:
+      - django_logs:/app/logs
+      - django_secrets:/app/secrets:ro
+      - celerybeat_data:/app/celerybeat
+
+    # Command / 命令
+    command: celery -A config beat -l INFO --scheduler /app/celerybeat/schedule
+
+    # Networks / 网络
+    networks:
+      - backend
+
+    # Dependencies / 依赖
+    depends_on:
+      - redis
+
+# Networks / 网络
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true  # Internal network for backend services / 后端服务内部网络
+
+# Volumes / 卷
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  django_static:
+    driver: local
+  django_media:
+    driver: local
+  django_logs:
+    driver: local
+  django_secrets:
+    driver: local
+  nginx_logs:
+    driver: local
+  mysql_logs:
+    driver: local
+  celerybeat_data:
+    driver: local
